@@ -1,0 +1,42 @@
+# ---------------------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------------------
+build/
+*.o
+*.so
+*.so.new
+
+# ---------------------------------------------------------------------------
+# Windows build - kept locally, not part of this repository.
+# The published project is the X11/ALSA platform layer only.
+# ---------------------------------------------------------------------------
+handmade/code/win32_*.cpp
+handmade/code/win32_*.h
+handmade/code/build.bat
+handmade/misc/shell.bat
+
+*.exe
+*.dll
+*.pdb
+*.obj
+*.map
+*.exp
+*.lib
+.vs/
+
+# ---------------------------------------------------------------------------
+# Input recording snapshots - one per replay slot, ~1 GB each
+# ---------------------------------------------------------------------------
+*.hmi
+
+# ---------------------------------------------------------------------------
+# Third-party material that is not mine to redistribute
+# ---------------------------------------------------------------------------
+handmade/misc/*.pdf
+handmade/data/*.wav
+
+# Images I do not hold the rights to redistribute.
+# container.jpg is expected at runtime - see README.
+handmade/data/silas.jpg
+handmade/data/container.jpg
+handmade/data/lol.png

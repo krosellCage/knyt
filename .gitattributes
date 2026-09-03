@@ -1,0 +1,15 @@
+# Let git normalise line endings in text, but never touch binaries.
+# Without this, core.autocrlf=true on Windows injects carriage returns into
+# images and video and silently corrupts them.
+* text=auto
+
+*.mp4 binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.wav binary
+*.pdf binary
+
+# Shell scripts must keep LF endings or Linux fails with
+# "bad interpreter: /bin/bash^M".
+*.sh text eol=lf
