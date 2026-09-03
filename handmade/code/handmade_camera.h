@@ -31,6 +31,11 @@ enum camera_movement
 #define CAMERA_DEFAULT_ZOOM        (45.0f*Pi32 / 180.0f)    // vertical field of view
 #define CAMERA_PITCH_LIMIT         (89.0f*Pi32 / 180.0f)
 
+// Bounds and rate for adjusting MovementSpeed at runtime (Q and E).
+#define CAMERA_SPEED_ADJUST_RATE   4.0f                     // units/sec, per second held
+#define CAMERA_MIN_SPEED           0.25f
+#define CAMERA_MAX_SPEED           40.0f
+
 struct camera
 {
     vec3 Position;

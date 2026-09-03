@@ -34,6 +34,7 @@ The build produces two artifacts: `debug/libknyt.so`, which is the game, and
 |---|---|
 | `W` `A` `S` `D` | move |
 | mouse | look |
+| `Q` `E` | fly slower / faster |
 | `F11` | fullscreen |
 | `P` | pause |
 | `L` | start/stop input recording, then loop playback |

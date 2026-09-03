@@ -282,13 +282,29 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     {
         CameraProcessMovement(&State->Camera, CameraMovement_Right, DeltaTime);
     }
-    if(Keyboard->LeftShoulder.EndedDown)
+    // Q and E adjust how fast the camera flies.  Held rather than tapped, so
+    // the rate is scaled by DeltaTime like the movement itself - otherwise it
+    // would change faster on a machine with a higher frame rate.
+    if(Keyboard->LeftShoulder.EndedDown) // Q - slower
     {
-
+        State->Camera.MovementSpeed -= CAMERA_SPEED_ADJUST_RATE * DeltaTime;
     }
-    if(Keyboard->RightShoulder.EndedDown)
+    if(Keyboard->RightShoulder.EndedDown) // E - faster
     {
+        State->Camera.MovementSpeed += CAMERA_SPEED_ADJUST_RATE * DeltaTime;
+    }
 
+    // NOTE(yigit): Clamped because the speed lives in game_state and persists
+    // across DLL reloads.  Without a floor it would go negative and invert the
+    // controls; without a ceiling a moment of leaning on E would leave the
+    // camera unusable until restart.
+    if(State->Camera.MovementSpeed < CAMERA_MIN_SPEED)
+    {
+        State->Camera.MovementSpeed = CAMERA_MIN_SPEED;
+    }
+    if(State->Camera.MovementSpeed > CAMERA_MAX_SPEED)
+    {
+        State->Camera.MovementSpeed = CAMERA_MAX_SPEED;
     }
 
     game_controller_input *Pad = GetController(Input, 1);
