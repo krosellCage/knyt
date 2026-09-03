@@ -1009,6 +1009,22 @@ XProcessEvents(x_state *State, Display* ClientDisplay, Window ClientWindow,
                         GlobalPause = !GlobalPause;
                     }
                 }
+                else if (KeySymbol == XK_F11)
+                {
+                    // NOTE(yigit): Guarded on IsDown so autorepeat cannot
+                    // toggle this once per repeat while the key is held.
+                    //
+                    // Unlike the Win32 side, we do not resize the window
+                    // ourselves - we ask the window manager to do it, via the
+                    // EWMH _NET_WM_STATE_FULLSCREEN hint.  The WM owns window
+                    // geometry on X11, so it also remembers where the window
+                    // was and puts it back when toggled off.  Nothing here has
+                    // to save the old placement.
+                    if(IsDown)
+                    {
+                        XToggleFullscreen(ClientDisplay, ClientWindow);
+                    }
+                }
                 else if (KeySymbol == XK_l) // FIXME(yigit): Segfault only in release mode after this line.
                 {
                     if(IsDown)
