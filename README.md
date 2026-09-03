@@ -37,6 +37,7 @@ The build produces two artifacts: `debug/libknyt.so`, which is the game, and
 | `F11` | fullscreen |
 | `P` | pause |
 | `L` | start/stop input recording, then loop playback |
+| `Esc` | quit |
 
 ## What's in here
 
