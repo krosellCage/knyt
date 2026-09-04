@@ -77,8 +77,6 @@ GameLoadTexture(thread_context *Thread, game_memory *Memory, game_opengl_api *GL
     return(Result);
 }
 
-// Book ch. 12.1, p. 113 - where the light sits in world space.  The cube drawn
-// here is purely a marker; only this vector feeds the lighting maths.
 global_variable const vec3 GlobalLightPos = {1.2f, 1.0f, 2.0f};
 
 // NOTE(yigit): Same shape as GlobalShaderFiles in handmade_shader.h.  The
@@ -189,10 +187,6 @@ GameInitOpenGL(thread_context *Thread, game_memory *Memory, game_state *State, g
     GL->glBindBuffer(GL_ARRAY_BUFFER, State->VBO[0]);
     GL->glBufferData(GL_ARRAY_BUFFER, sizeof(Vertices), Vertices, GL_STATIC_DRAW);
 
-    // NOTE(yigit): The stride is 8 floats for ALL THREE attributes - it is the
-    // distance to the next vertex, which does not depend on which field you
-    // are reading.  Only the offset differs.
-    //
     // Attribute 0 - aPos, 3 floats at offset 0
     GL->glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
     GL->glEnableVertexAttribArray(0);
@@ -205,17 +199,6 @@ GameInitOpenGL(thread_context *Thread, game_memory *Memory, game_state *State, g
     GL->glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
     GL->glEnableVertexAttribArray(2);
 
-    // ---------------------------------------------------------------------
-    // VAO[1] - the light marker.  Book ch. 12.1, p. 112.
-    //
-// NOTE(yigit): Same VBO, no second upload - the vertices are already on
-    // the GPU.  It gets its own VAO purely so that the attribute changes the
-    // lighting chapters make to the container cannot reach the light source.
-    //
-    // NOTE(yigit): The marker reads only the first 3 floats of each vertex and
-    // ignores the other 5, but the STRIDE still has to be 8 - that is how far
-    // apart the vertices are in the buffer.  Book ch. 13.3, p. 118.
-    // ---------------------------------------------------------------------
     GL->glBindVertexArray(State->VAO[1]);
 
     GL->glBindBuffer(GL_ARRAY_BUFFER, State->VBO[0]);
@@ -272,18 +255,10 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     real32 DeltaTime = Input->dtForFrame;
 
 
-    // Book ch. 10.7 - mouse look.  The book needs GLFW callbacks and a
-    // lastX/lastY pair to turn absolute cursor positions into offsets, plus
-    // GLFW_CURSOR_DISABLED to capture the pointer.  Win32UpdateMouseWarping
-    // already hides the cursor, re-centres it every frame, leaves the movement
-    // in MouseDeltaX/Y, and zeroes them when the window is inactive - which is
-    // also the fix for the book's "large sudden jump" on first focus.
     CameraProcessMouseLook(&State->Camera,
                            (real32)Input->MouseDeltaX,
                            (real32)Input->MouseDeltaY);
 
-    // Book ch. 10.9 - scroll wheel zooms by narrowing the field of view.
-    // MouseZ is in whole wheel notches; the platform divides out WHEEL_DELTA.
     CameraProcessZoom(&State->Camera, (real32)Input->MouseZ);
 
     if(Keyboard->MoveUp.EndedDown) // forward
