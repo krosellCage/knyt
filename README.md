@@ -81,7 +81,10 @@ into the platform's audio ring buffer with looping.
 **Lighting**
 
 Phong — ambient, diffuse and specular — computed in view space, with material
-and light properties as separate GLSL structs.
+and light properties as separate GLSL structs. Lighting maps drive it per
+fragment: a diffuse map for surface colour, a specular map so the steel
+borders shine and the wood does not, and a scrolling emission map that glows
+independently of the light.
 
 ## Attribution
 
@@ -110,12 +113,13 @@ This is a learning project and it stands on other people's work.
 ### Assets
 
 `handmade/data` holds the shaders, but not the textures — those are not mine to
-redistribute. The renderer expects two files alongside the shaders:
+redistribute. The renderer expects three files alongside the shaders:
 
 | file | where to get it |
 |---|---|
-| `container.jpg` | [learnopengl.com/img/textures/container.jpg](https://learnopengl.com/img/textures/container.jpg) |
-| `lol.png` | any image; it is the second texture in the `mix()` blend |
+| `container2.png` | [learnopengl.com/img/textures/container2.png](https://learnopengl.com/img/textures/container2.png) — diffuse map |
+| `container2_specular.png` | [learnopengl.com/img/textures/container2_specular.png](https://learnopengl.com/img/textures/container2_specular.png) — specular map |
+| `matrix.jpg` | [learnopengl.com/img/textures/matrix.jpg](https://learnopengl.com/img/textures/matrix.jpg) — emission map, by creativesam |
 
 Without them the texture load fails, logs which file it could not read, and the
 scene renders untextured rather than crashing.

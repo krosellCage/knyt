@@ -81,11 +81,31 @@ GameLoadTexture(thread_context *Thread, game_memory *Memory, game_opengl_api *GL
 // here is purely a marker; only this vector feeds the lighting maths.
 global_variable const vec3 GlobalLightPos = {1.2f, 1.0f, 2.0f};
 
+// NOTE(yigit): Same shape as GlobalShaderFiles in handmade_shader.h.  The
+// table order IS the order of game_state's Texture array, which is also the
+// texture unit each one gets bound to below.  Adding a texture is one line
+// here and one more slot in the array; no other code in this file changes.
+global_variable const char *GlobalTextureFiles[] =
+{
+    "data\\container2.png",           // unit 0 - diffuse map
+    "data\\container2_specular.png",  // unit 1 - specular map
+    "data\\matrix.jpg",               // unit 2 - emission map
+};
+
 internal void
 GameInitOpenGL(thread_context *Thread, game_memory *Memory, game_state *State, game_opengl_api *GL)
 {
-    State->Texture[0] = GameLoadTexture(Thread, Memory, GL, "data\\container.jpg",GL_REPEAT);
-    State->Texture[1] = GameLoadTexture(Thread, Memory, GL, "data\\lol.png",GL_REPEAT);
+    // The table and the array have to stay the same length, or the loop below
+    // walks off the end of one of them.
+    Assert(ArrayCount(GlobalTextureFiles) == ArrayCount(State->Texture));
+    for(uint32 TextureIndex = 0;
+        TextureIndex < ArrayCount(GlobalTextureFiles);
+        ++TextureIndex)
+    {
+        State->Texture[TextureIndex] = GameLoadTexture(Thread, Memory, GL,
+                                                       GlobalTextureFiles[TextureIndex],
+                                                       GL_REPEAT);
+    }
 
     // NOTE(yigit): Required now that there is a solid object.  Without it the
     // back faces draw over the front ones in whatever order they happen to be
@@ -349,13 +369,25 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
 
     vec3 DiffuseColor = LightColor * 0.5f;
     vec3 AmbientColor = DiffuseColor * 0.2f;
-    // NOTE(yigit): Textures are unused from here until ch. 15, where they come
-    // back as diffuse maps.  Left bound rather than deleted so that chapter is
-    // a shader change instead of a rewrite.
-    GL->glActiveTexture(GL_TEXTURE0);
-    GL->glBindTexture(GL_TEXTURE_2D, State->Texture[0]);
-    GL->glActiveTexture(GL_TEXTURE1);
-    GL->glBindTexture(GL_TEXTURE_2D, State->Texture[1]);
+
+    // Bind every texture to the unit that matches its own index.  The spec
+    // guarantees GL_TEXTUREi == GL_TEXTURE0 + i, so this arithmetic is
+    // defined rather than a trick.  Unit N always holds Texture[N], which is
+    // the convention the material.* sampler uniforms below rely on.
+    for(uint32 TextureIndex = 0;
+        TextureIndex < ArrayCount(State->Texture);
+        ++TextureIndex)
+    {
+        GL->glActiveTexture(GL_TEXTURE0 + TextureIndex);
+        GL->glBindTexture(GL_TEXTURE_2D, State->Texture[TextureIndex]);
+    }
+
+    // NOTE(yigit): Named once here rather than spelled State->ShaderProgram[N]
+    // at every call site.  Eighteen repetitions of the same subscript is
+    // eighteen chances to reach for the wrong index, and the names say which
+    // program is which - the array index does not.
+    uint32 LitProgram = State->ShaderProgram[0];
+    uint32 LampProgram = State->ShaderProgram[1];
 
     // ---------------------------------------------------------------------
     // The lit objects
@@ -364,31 +396,34 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     // Book ch. 13.4 - the shader needs the light's world position to work out
     // which way the light is coming from at each fragment.  Same vector the
     // marker cube is drawn at, so the two can never disagree.
-    SetUniformVec3(GL, State->ShaderProgram[0], "lightPos",
+    SetUniformVec3(GL, LitProgram, "lightPos",
                    LightPos);
 
     // View and projection are the same for every cube, so they only need
     // setting once - only the model matrix changes between draws.
-    SetUniformMat4(GL, State->ShaderProgram[0], "view", View);
-    SetUniformMat4(GL, State->ShaderProgram[0], "projection", Projection);
+    SetUniformMat4(GL, LitProgram, "view", View);
+    SetUniformMat4(GL, LitProgram, "projection", Projection);
 
-    // The MATERIAL is the surface itself - it does not change.  Coral.
-    SetUniformVec3(GL, State->ShaderProgram[0], "material.ambient",  1.0f, 0.5f, 0.31f);
-    SetUniformVec3(GL, State->ShaderProgram[0], "material.diffuse",  1.0f, 0.5f, 0.31f);
-    SetUniformVec3(GL, State->ShaderProgram[0], "material.specular", 0.5f, 0.5f, 0.5f);
-    SetUniformFloat(GL, State->ShaderProgram[0], "material.shininess", 32.0f);
+    // The MATERIAL is the surface itself.  The colours now come from the maps
+    // bound above, so only shininess is left as a plain uniform.
+    SetUniformFloat(GL, LitProgram, "material.shininess", 32.0f);
 
     // The LIGHT is what changes.  Book ch. 14.3 puts the animated colours here,
     // not on the material - the lamp is changing colour, the paint is not.
-    SetUniformVec3(GL, State->ShaderProgram[0], "light.ambient",  AmbientColor);
-    SetUniformVec3(GL, State->ShaderProgram[0], "light.diffuse",  DiffuseColor);
-    SetUniformVec3(GL, State->ShaderProgram[0], "light.specular", 1.0f, 1.0f, 1.0f);
+    SetUniformVec3(GL, LitProgram, "light.ambient",  AmbientColor);
+    SetUniformVec3(GL, LitProgram, "light.diffuse",  DiffuseColor);
+    SetUniformVec3(GL, LitProgram, "light.specular", 1.0f, 1.0f, 1.0f);
 
-    GL->glUseProgram(State->ShaderProgram[0]);
+    SetUniformInt(GL, LitProgram, "material.diffuse", 0);
+    SetUniformInt(GL, LitProgram, "material.specular", 1);
+    SetUniformInt(GL, LitProgram, "material.emission", 2);
+    SetUniformFloat(GL, LitProgram, "time", State->TimeSeconds);
+
+    GL->glUseProgram(LitProgram);
     GL->glBindVertexArray(State->VAO[0]);
 
     // One container at the origin, unrotated - book ch. 12.1.
-    SetUniformMat4(GL, State->ShaderProgram[0], "model", Mat4Identity());
+    SetUniformMat4(GL, LitProgram, "model", Mat4Identity());
 
     GL->glDrawArrays(GL_TRIANGLES, 0, State->VertexCount);
 
@@ -399,8 +434,8 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     // belong to a program, not to the context - the ones set on
     // ShaderProgram[0] above simply do not exist in this one.
     // ---------------------------------------------------------------------
-    SetUniformMat4(GL, State->ShaderProgram[1], "view", View);
-    SetUniformMat4(GL, State->ShaderProgram[1], "projection", Projection);
+    SetUniformMat4(GL, LampProgram, "view", View);
+    SetUniformMat4(GL, LampProgram, "projection", Projection);
 
 
     // Scale on the RIGHT so it happens first: shrink the cube at the origin,
@@ -411,13 +446,13 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
                                               LightPos.Z),
                               Mat4Scale(0.2f, 0.2f, 0.2f));
 
-    SetUniformMat4(GL, State->ShaderProgram[1], "model", LightModel);
+    SetUniformMat4(GL, LampProgram, "model", LightModel);
 
     // Book ch. 14.4 exercise 1 - the marker takes the light's own colour, so
     // the lamp visibly matches what it is casting.
-    SetUniformVec4(GL, State->ShaderProgram[1], "LightColor", LightColor, 1.0f);
+    SetUniformVec4(GL, LampProgram, "LightColor", LightColor, 1.0f);
 
-    GL->glUseProgram(State->ShaderProgram[1]);
+    GL->glUseProgram(LampProgram);
     GL->glBindVertexArray(State->VAO[1]);
     GL->glDrawArrays(GL_TRIANGLES, 0, State->VertexCount);
 

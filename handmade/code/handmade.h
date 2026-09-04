@@ -135,7 +135,7 @@ struct game_state
     uint32 EBO;
     uint32 VBO[1];
     uint32 VertexCount;
-    uint32 Texture[2];
+    uint32 Texture[3];
 
     // NOTE(yigit): Everything in PermanentStorage that comes AFTER game_state
     // itself.  Set up once via InitializeArena - see the !IsInitialized block

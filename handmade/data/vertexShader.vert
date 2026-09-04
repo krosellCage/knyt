@@ -5,22 +5,22 @@ layout (location = 2) in vec2 aTexCoord;
 
 out vec3 FragPos;
 out vec3 Normal;
-out vec2 TexCoord;
+out vec2 TexCoords;
 
 uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
 
+uniform vec3 lightPos;
+out vec3 LightPosView;
+
 void main()
 {
-    // The lighting maths all happens in WORLD space, so the fragment shader
-    // needs this vertex's world position - model only, no view or projection.
-    // Those two would move it into camera space, where the light position
-    // uniform no longer means the same thing.
-    FragPos = vec3(model * vec4(aPos, 1.0));
+    FragPos = vec3(view * model * vec4(aPos, 1.0));
 
-    Normal = aNormal;
+    Normal = mat3(view * model) * aNormal;
+    LightPosView = vec3(view * vec4(lightPos, 1.0));
 
-    TexCoord = aTexCoord;
+    TexCoords = aTexCoord;
     gl_Position = projection * view * model * vec4(aPos, 1.0);
 }
