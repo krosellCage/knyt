@@ -87,7 +87,23 @@ global_variable const char *GlobalTextureFiles[] =
 {
     "data\\container2.png",           // unit 0 - diffuse map
     "data\\container2_specular.png",  // unit 1 - specular map
-    "data\\matrix.jpg",               // unit 2 - emission map
+};
+
+// Book ch. 9.3, p. 96 - ten containers scattered through the scene.  The
+// geometry is the same 36 vertices drawn ten times; only the model matrix
+// differs, which is the whole point of the exercise.
+global_variable const vec3 GlobalCubePositions[] =
+{
+    { 0.0f,  0.0f,   0.0f},
+    { 2.0f,  5.0f, -15.0f},
+    {-1.5f, -2.2f,  -2.5f},
+    {-3.8f, -2.0f, -12.3f},
+    { 2.4f, -0.4f,  -3.5f},
+    {-1.7f,  3.0f,  -7.5f},
+    { 1.3f, -2.0f,  -2.5f},
+    { 1.5f,  2.0f,  -2.5f},
+    { 1.5f,  0.2f,  -1.5f},
+    {-1.3f,  1.0f,  -1.5f},
 };
 
 internal void
@@ -214,13 +230,8 @@ GameInitOpenGL(thread_context *Thread, game_memory *Memory, game_state *State, g
 internal void
 SetLitUniforms(game_opengl_api *GL, uint32 Program,
                mat4 View, mat4 Projection,
-               vec3 LightPos, vec3 AmbientColor, vec3 DiffuseColor,
-               real32 Time)
+               vec3 AmbientColor, vec3 DiffuseColor)
 {
-    // Book ch. 13.4 - the shader needs the light's world position to work out
-    // which way the light is coming from at each fragment.
-    SetUniformVec3(GL, Program, "lightPos", LightPos);
-
     SetUniformMat4(GL, Program, "view", View);
     SetUniformMat4(GL, Program, "projection", Projection);
 
@@ -233,15 +244,24 @@ SetLitUniforms(game_opengl_api *GL, uint32 Program,
     SetUniformVec3(GL, Program, "light.ambient",  AmbientColor);
     SetUniformVec3(GL, Program, "light.diffuse",  DiffuseColor);
     SetUniformVec3(GL, Program, "light.specular", 1.0f, 1.0f, 1.0f);
+    SetUniformFloat(GL, Program, "light.constant", 1.0f);
+    // Book ch. 16.2 - the table row for a range of about 50 units.  The
+    // 3250-unit row (0.0014 / 0.000007) gives no visible falloff in a scene
+    // this small.
+    SetUniformFloat(GL, Program, "light.linear", 0.09f);
+    SetUniformFloat(GL, Program, "light.quadratic", 0.032f);
+
+    // Cos takes RADIANS.  Passing 12.5 raw is 12.5 radians, which works out as
+    // a 3.8 degree cone - wrong, but close enough to look plausible.
+    SetUniformFloat(GL, Program, "light.cutOff", Cos(12.5f*Pi32 / 180.0f));
+    SetUniformFloat(GL, Program, "light.outerCutOff", Cos(17.5f*Pi32 / 180.0f));
+
 
     // Which texture unit each sampler reads from.  Constant, but uniforms do
     // not survive a program rebuild, so they are re-sent every frame like the
     // rest.
     SetUniformInt(GL, Program, "material.diffuse", 0);
     SetUniformInt(GL, Program, "material.specular", 1);
-    SetUniformInt(GL, Program, "material.emission", 2);
-
-    SetUniformFloat(GL, Program, "time", Time);
 }
 
 // NOTE(yigit): View and projection have to be set here as well as on the lit
@@ -249,11 +269,10 @@ SetLitUniforms(game_opengl_api *GL, uint32 Program,
 // over there simply do not exist in this one.
 internal void
 SetLampUniforms(game_opengl_api *GL, uint32 Program,
-                mat4 View, mat4 Projection, mat4 Model, vec3 LightColor)
+                mat4 View, mat4 Projection, vec3 LightColor)
 {
     SetUniformMat4(GL, Program, "view", View);
     SetUniformMat4(GL, Program, "projection", Projection);
-    SetUniformMat4(GL, Program, "model", Model);
 
     // Book ch. 14.4 exercise 1 - the marker takes the light's own colour, so
     // the lamp visibly matches what it is casting.
@@ -378,29 +397,11 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     GL->glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     GL->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-    real32 Radius = 2.0f;
-    vec3 LightPos = Vec3(Sin(State->TimeSeconds) * Radius,
-            1.0f,
-            Cos(State->TimeSeconds) * Radius);
-
-    // Book ch. 14.3 - cycle the light's colour.  Three different frequencies so
-    // the channels drift out of phase and the hue keeps changing.
-    //
-    // NOTE(yigit): Sin returns -1..1, but colours live in 0..1 - a negative
-    // channel just clamps to zero.  Raw Sin therefore spends about half its
-    // time dark, which is why the marker cube kept going black.  The
-    // *0.5 + 0.5 remaps the wave into 0..1 so it dims instead of vanishing.
-    vec3 LightColor = Vec3(Sin(State->TimeSeconds * 2.0f) * 0.5f + 0.5f,
-                           Sin(State->TimeSeconds * 0.7f) * 0.5f + 0.5f,
-                           Sin(State->TimeSeconds * 1.3f) * 0.5f + 0.5f);
+    vec3 LightColor =  Vec3(1.0f, 1.0f, 1.0f);
 
     vec3 DiffuseColor = LightColor * 0.5f;
     vec3 AmbientColor = DiffuseColor * 0.2f;
 
-    // Bind every texture to the unit that matches its own index.  The spec
-    // guarantees GL_TEXTUREi == GL_TEXTURE0 + i, so this arithmetic is
-    // defined rather than a trick.  Unit N always holds Texture[N], which is
-    // the convention the material.* sampler uniforms below rely on.
     for(uint32 TextureIndex = 0;
         TextureIndex < ArrayCount(State->Texture);
         ++TextureIndex)
@@ -418,19 +419,32 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     // ---------------------------------------------------------------------
     // The lit objects
     // ---------------------------------------------------------------------
-    SetLitUniforms(GL, LitProgram, View, Projection,
-                   LightPos, AmbientColor, DiffuseColor,
-                   State->TimeSeconds);
+    SetLitUniforms(GL, LitProgram, View, Projection, AmbientColor, DiffuseColor);
 
     GL->glUseProgram(LitProgram);
     GL->glBindVertexArray(State->VAO[0]);
 
-    // One container at the origin, unrotated - book ch. 12.1.  Model is set
-    // here rather than inside SetLitUniforms because it is the one uniform
-    // that would change between draws if there were more than one cube.
-    SetUniformMat4(GL, LitProgram, "model", Mat4Identity());
+    // Model is the only uniform that changes between the ten draws, which is
+    // why SetLitUniforms runs once above the loop and this one is set inside.
+    for(uint32 CubeIndex = 0;
+        CubeIndex < ArrayCount(GlobalCubePositions);
+        ++CubeIndex)
+    {
+        vec3 P = GlobalCubePositions[CubeIndex];
 
-    GL->glDrawArrays(GL_TRIANGLES, 0, State->VertexCount);
+        // Rotation on the RIGHT so it happens first: spin the cube about its
+        // own centre, then move it out to P.  The other order would swing it
+        // around the world origin instead - the same trap as the light marker
+        // below.  The axis need not be unit length; Mat4RotationAxis
+        // normalizes it.
+        real32 Angle = (20.0f*(real32)CubeIndex) * (Pi32 / 180.0f);
+        mat4 Model = Mat4Mul(Mat4Translation(P.X, P.Y, P.Z),
+                             Mat4RotationAxis(Vec3(1.0f, 0.3f, 0.5f), Angle));
+
+        SetUniformMat4(GL, LitProgram, "model", Model);
+
+        GL->glDrawArrays(GL_TRIANGLES, 0, State->VertexCount);
+    }
 
     // ---------------------------------------------------------------------
     // The light marker
@@ -439,12 +453,8 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     // Scale on the RIGHT so it happens first: shrink the cube at the origin,
     // then move it out to the light.  The other order would scale the
     // translation too and put the marker at a fifth of the distance.
-    mat4 LightModel = Mat4Mul(Mat4Translation(LightPos.X,
-                                              LightPos.Y,
-                                              LightPos.Z),
-                              Mat4Scale(0.2f, 0.2f, 0.2f));
-
-    SetLampUniforms(GL, LampProgram, View, Projection, LightModel, LightColor);
+    
+    SetLampUniforms(GL, LampProgram, View, Projection, LightColor);
 
     GL->glUseProgram(LampProgram);
     GL->glBindVertexArray(State->VAO[1]);

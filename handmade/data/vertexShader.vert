@@ -11,15 +11,11 @@ uniform mat4 model;
 uniform mat4 view;
 uniform mat4 projection;
 
-uniform vec3 lightPos;
-out vec3 LightPosView;
-
 void main()
 {
     FragPos = vec3(view * model * vec4(aPos, 1.0));
 
     Normal = mat3(view * model) * aNormal;
-    LightPosView = vec3(view * vec4(lightPos, 1.0));
 
     TexCoords = aTexCoord;
     gl_Position = projection * view * model * vec4(aPos, 1.0);

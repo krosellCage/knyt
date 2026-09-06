@@ -82,9 +82,9 @@ into the platform's audio ring buffer with looping.
 
 Phong — ambient, diffuse and specular — computed in view space, with material
 and light properties as separate GLSL structs. Lighting maps drive it per
-fragment: a diffuse map for surface colour, a specular map so the steel
-borders shine and the wood does not, and a scrolling emission map that glows
-independently of the light.
+fragment: a diffuse map for surface colour and a specular map so the steel
+borders of the container shine and the wood does not. The light is
+directional, so its rays are parallel and distance plays no part.
 
 ## Attribution
 
@@ -97,10 +97,19 @@ This is a learning project and it stands on other people's work.
   none of it is reproduced here; the X11 implementation is written from scratch
   against a different set of APIs.
 
-- **[LearnOpenGL](https://learnopengl.com)** by Joey de Vries. The renderer
-  follows this book. Where the book uses GLFW, GLAD and GLM, this project uses
-  its own equivalents, so the code differs throughout even where the concepts do
-  not.
+- **[LearnOpenGL](https://learnopengl.com)** by **Joey de Vries**
+  ([@JoeyDeVriez](https://twitter.com/JoeyDeVriez)). The renderer follows this
+  book, and the shaders and lighting maths here are derived from its code
+  samples. Where the book uses GLFW, GLAD and GLM, this project uses its own
+  equivalents, so the surrounding code differs throughout even where the
+  concepts do not.
+
+  Those code samples are © Joey de Vries and licensed
+  [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/). The
+  **NonCommercial** term travels with anything derived from them, which
+  includes the GLSL in `handmade/data`. Textures and other images from the site
+  are [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); none are
+  redistributed here — see Assets below.
 
 - **[xcb_handmade](https://github.com/nxsy/xcb_handmade)** by Neil Blakey-Milner
   and contributors, BSD licensed. A reference while writing the Linux platform
@@ -113,13 +122,19 @@ This is a learning project and it stands on other people's work.
 ### Assets
 
 `handmade/data` holds the shaders, but not the textures — those are not mine to
-redistribute. The renderer expects three files alongside the shaders:
+redistribute. The renderer expects two files alongside the shaders:
 
 | file | where to get it |
 |---|---|
 | `container2.png` | [learnopengl.com/img/textures/container2.png](https://learnopengl.com/img/textures/container2.png) — diffuse map |
 | `container2_specular.png` | [learnopengl.com/img/textures/container2_specular.png](https://learnopengl.com/img/textures/container2_specular.png) — specular map |
-| `matrix.jpg` | [learnopengl.com/img/textures/matrix.jpg](https://learnopengl.com/img/textures/matrix.jpg) — emission map, by creativesam |
 
 Without them the texture load fails, logs which file it could not read, and the
 scene renders untextured rather than crashing.
+
+## License
+
+Not a single licence — see [LICENSE](LICENSE). In short: the platform layer,
+maths, camera, sound and shader tooling are MIT; the GLSL in `handmade/data` is
+derived from LearnOpenGL's code samples and carries their CC BY-NC 4.0 terms,
+so it is **not** free for commercial use.

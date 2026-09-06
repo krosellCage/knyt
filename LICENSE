@@ -1,0 +1,89 @@
+This repository is not under a single licence.  It is a learning project built
+by following a book, so parts of it are original work and parts are derived
+from someone else's.  The two are separated below.
+
+===============================================================================
+1. ORIGINAL WORK - MIT
+===============================================================================
+
+Everything in handmade/code EXCEPT stb_image.h (see section 3), plus the
+README, the build scripts, the repository layout, and handmade/misc/cubes.mp4.
+That is the X11/ALSA platform layer, the OpenGL extension loading, the maths
+library, the camera, the WAV parser, the shader compilation and hot reloading,
+and the game layer that drives them.
+
+    MIT License
+
+    Copyright (c) 2026 yigit
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in
+    all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+
+===============================================================================
+2. SHADERS - CC BY-NC 4.0, NOT MIT
+===============================================================================
+
+The GLSL in handmade/data (*.vert, *.frag) is derived from the code samples in
+LearnOpenGL.  The Phong lighting maths, the Material and Light structs, the
+lighting map sampling and the spotlight intensity formula follow the book
+closely enough to count as derivative work, so its licence applies to them and
+MIT above does NOT.
+
+    Code samples copyright (c) Joey de Vries
+    https://learnopengl.com
+    https://twitter.com/JoeyDeVriez
+
+    Licensed under CC BY-NC 4.0:
+    https://creativecommons.org/licenses/by-nc/4.0/
+
+NonCommercial.  These files may be used, studied and modified, but not used
+commercially without permission from the copyright holder.
+
+===============================================================================
+3. THIRD-PARTY CODE INCLUDED HERE
+===============================================================================
+
+handmade/code/stb_image.h
+    by Sean Barrett.  Public domain (or MIT, at your option) - the dual-licence
+    notice at the end of that file governs it, not this one.
+    https://github.com/nothings/stb
+
+===============================================================================
+4. WORK THAT INFLUENCED THIS BUT IS NOT REPRODUCED
+===============================================================================
+
+Handmade Hero, by Casey Muratori (https://handmadehero.org)
+    The platform layer's architecture follows his design - the
+    game-as-a-reloadable-library split, the game_memory / game_input interface,
+    the memory arena, the input recording system.  His source is not freely
+    distributable and none of it appears here; the X11 implementation was
+    written from scratch against a different set of APIs.
+
+xcb_handmade, by Neil Blakey-Milner and contributors (BSD licensed)
+    https://github.com/nxsy/xcb_handmade
+    Consulted while writing the Linux platform layer.  That project targets XCB
+    and this one targets Xlib.
+
+===============================================================================
+5. ASSETS
+===============================================================================
+
+No textures, audio or PDFs are distributed in this repository.  They are
+gitignored, and the README lists the ones the renderer expects with links to
+their sources.  The container textures from LearnOpenGL are CC BY 4.0.  Nothing
+here grants any right to them.
