@@ -142,9 +142,8 @@ This is a learning project and it stands on other people's work.
 
 ### Assets
 
-`handmade/data` holds the shaders, `cube.obj` and `peugeot.mtl` — all written
-here. Models are not mine to redistribute, so they are gitignored and have to
-be fetched.
+`handmade/data` holds the shaders and `cube.obj`, both written here. Models are
+not mine to redistribute, so they are gitignored and have to be fetched.
 
 **The default scene is Crytek Sponza**, the standard graphics test atrium:
 
@@ -158,10 +157,9 @@ materials, 262k triangles, texture coordinates on every face. It is scaled to
 `0.02` at draw time because it is modelled at roughly 3700 units across and the
 far plane is 100.
 
-Any OBJ works — point `GameInitOpenGL` at a different file. The tree also
-carries a hand-written `peugeot.mtl` for the Peugeot Onyx Concept (free on
-[Sketchfab](https://sketchfab.com)), which ships without a material library of
-its own; rename that model to `peugeot.obj` to use it.
+Any OBJ works — point `GameInitOpenGL` at a different file. A model with no
+`.mtl` beside it still loads; every submesh falls back to a mid-grey default
+rather than rendering black or invisible.
 
 Without a model the load fails, logs which file it could not read, and the
 scene renders empty rather than crashing.
