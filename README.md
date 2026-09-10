@@ -80,11 +80,27 @@ into the platform's audio ring buffer with looping.
 
 **Lighting**
 
-Phong — ambient, diffuse and specular — computed in view space, with material
-and light properties as separate GLSL structs. Lighting maps drive it per
-fragment: a diffuse map for surface colour and a specular map so the steel
-borders of the container shine and the wood does not. The light is
-directional, so its rays are parallel and distance plays no part.
+Phong — ambient, diffuse and specular — computed in view space, with each light
+type as its own GLSL struct and its own function. Six lights are summed per
+fragment: one directional, four point lights with distance attenuation, and a
+spotlight held at the camera with a soft-edged cone.
+
+Because the maths runs in view space, the camera is the origin looking down −Z
+by definition, so the flashlight needs no position or direction uniform at all.
+
+**Model loading** — `handmade_obj.h`
+
+A Wavefront OBJ and `.mtl` parser, replacing the book's use of Assimp. It walks
+the file twice — once to count so the arena can allocate exactly, once to fill —
+fans polygons of any size into triangles as it goes, and resolves OBJ's
+1-based, sometimes-negative, three-lists-per-corner indexing into the single
+index per vertex OpenGL requires.
+
+Duplicate vertices are merged by bucketing on position index rather than
+hashing, and the index buffer is grouped by material with a counting sort so
+each material is one `glDrawElements` call. Materials come from a `.mtl`;
+those with no texture bind a 1×1 white pixel, so one shader path covers both.
+
 
 ## Attribution
 
@@ -107,9 +123,8 @@ This is a learning project and it stands on other people's work.
   Those code samples are © Joey de Vries and licensed
   [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/). The
   **NonCommercial** term travels with anything derived from them, which
-  includes the GLSL in `handmade/data`. Textures and other images from the site
-  are [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/); none are
-  redistributed here — see Assets below.
+  includes the GLSL in `handmade/data`. No LearnOpenGL textures are
+  redistributed here — the renderer loads its own model and materials.
 
 - **[xcb_handmade](https://github.com/nxsy/xcb_handmade)** by Neil Blakey-Milner
   and contributors, BSD licensed. A reference while writing the Linux platform
@@ -121,16 +136,22 @@ This is a learning project and it stands on other people's work.
 
 ### Assets
 
-`handmade/data` holds the shaders, but not the textures — those are not mine to
-redistribute. The renderer expects two files alongside the shaders:
+`handmade/data` holds the shaders, `cube.obj` and `peugeot.mtl` — all written
+here. The model itself is not mine to redistribute, so it is gitignored and has
+to be fetched:
 
 | file | where to get it |
 |---|---|
-| `container2.png` | [learnopengl.com/img/textures/container2.png](https://learnopengl.com/img/textures/container2.png) — diffuse map |
-| `container2_specular.png` | [learnopengl.com/img/textures/container2_specular.png](https://learnopengl.com/img/textures/container2_specular.png) — specular map |
+| `peugeot.obj` | Peugeot Onyx Concept, free on [Sketchfab](https://sketchfab.com) / [Free3D](https://free3d.com). Rename the `.obj` to `peugeot.obj` |
+| `Tyre.png`, `Car.Brake-Disk.BMP.png` | ship alongside that model |
 
-Without them the texture load fails, logs which file it could not read, and the
-scene renders untextured rather than crashing.
+`peugeot.mtl` is written by hand, because that model was distributed without
+one. Its material names match the OBJ's `usemtl` lines; the colour values are
+chosen to look right, not measured.
+
+Any OBJ works — point `GameInitOpenGL` at a different file. Without one the
+load fails, logs which file it could not read, and the scene renders empty
+rather than crashing.
 
 ## License
 

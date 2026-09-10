@@ -5,93 +5,172 @@ in vec3 FragPos;
 in vec3 Normal;
 in vec2 TexCoords;
 
+#define NR_POINT_LIGHTS 4
+
 struct Material {
     sampler2D diffuse;
     sampler2D specular;
+
+    // Book ch. 18 - the .mtl Kd and Ks.  These MULTIPLY the texture sample
+    // rather than replacing it, so one code path covers both cases: a material
+    // with no texture binds a 1x1 white texture, and white times Kd is Kd.
+    // No branch, no second shader.
+    vec3 diffuseColor;
+    vec3 specularColor;
+
     float shininess;
 };
 
-struct Light {
+// Book ch. 17.1 - no position, so no attenuation and no cone.
+struct DirLight {
+    vec3 direction;     // VIEW space, pointing from the light into the scene
+
     vec3 ambient;
     vec3 diffuse;
     vec3 specular;
+};
 
-    // Book ch. 16.2 - attenuation.  Distance falls off as
-    // 1 / (constant + linear*d + quadratic*d*d).
+// Book ch. 17.2 - a position instead of a direction, and distance falls off as
+// 1 / (constant + linear*d + quadratic*d*d).
+struct PointLight {
+    vec3 position;      // VIEW space
+
     float constant;
     float linear;
     float quadratic;
 
-    // Book ch. 16.3 - the cone.  Stored as the COSINE of the half-angle, not
-    // the angle: dot() below hands back a cosine for free, and comparing
-    // cosines avoids an acos() per fragment.
-    //
-    // Book ch. 16.4 - outerCutOff is a WIDER cone, so its cosine is SMALLER.
-    // The band between the two is the soft edge.
-    float cutOff;
-    float outerCutOff;
+    vec3 ambient;
+    vec3 diffuse;
+    vec3 specular;
 };
 
-uniform Light light;
+// Book ch. 17.3 - a point light with a cone bolted on.
+//
+// NOTE(yigit): No position or direction member.  This flashlight is held at the
+// camera, and in VIEW SPACE the camera is the origin looking down -Z by
+// definition - so both are constants inside CalcSpotLight.  The book has to
+// pass camera.Position and camera.Front only because it lights in world space.
+struct SpotLight {
+    float constant;
+    float linear;
+    float quadratic;
+
+    // Cosines of the half-angles, not the angles: dot() hands back a cosine for
+    // free, so the cone test never needs an acos().  outerCutOff is the WIDER
+    // cone, so its cosine is the SMALLER number.
+    float cutOff;
+    float outerCutOff;
+
+    vec3 ambient;
+    vec3 diffuse;
+    vec3 specular;
+};
+
 uniform Material material;
+uniform DirLight dirLight;
+uniform PointLight pointLights[NR_POINT_LIGHTS];
+uniform SpotLight spotLight;
 
-void main()
+vec3 CalcDirLight(DirLight light, vec3 normal, vec3 viewDir)
 {
-    vec3 DiffuseSample = texture(material.diffuse, TexCoords).rgb;
+    // Negated because light.direction points INTO the scene, and the dot
+    // product below wants a vector pointing from the surface back to the light.
+    vec3 lightDir = normalize(-light.direction);
 
-    // Outside the cone test, so the scene is never pitch black.
-    vec3 ambient = light.ambient * DiffuseSample;
+    float diff = max(dot(normal, lightDir), 0.0);
 
-    // NOTE(yigit): In VIEW SPACE the camera sits at the origin and looks down
-    // -Z, by definition.  So a flashlight held at the camera has a position
-    // and a direction that are CONSTANTS - the book has to pass camera.Position
-    // and camera.Front as uniforms only because it lights in world space.
-    const vec3 SpotDirection = vec3(0.0, 0.0, -1.0);
-
-    // The light is at the origin, so "towards the light" is just -FragPos.
-    vec3 lightDir = normalize(-FragPos);
-
-    // dot() of two unit vectors IS the cosine of the angle between them.
-    // -SpotDirection points back up the cone's axis, towards the lamp, the same
-    // way lightDir does - so theta is 1 dead centre and falls off outward.
-    //
-    // NOTE(yigit): Cosine runs BACKWARDS.  A smaller angle gives a BIGGER
-    // cosine, so "inside the cone" is > cutOff, not <.
-    float theta = dot(lightDir, -SpotDirection);
-
-    // Book ch. 16.4 - the soft edge, and the reason there is no longer an
-    // if(theta > cutOff) here.  The clamp already covers all three cases:
-    //   inside the inner cone  -> theta large  -> clamps to 1, full light
-    //   in the band between    -> 0 .. 1       -> the fade
-    //   outside the outer cone -> theta small  -> clamps to 0, nothing
-    // Branching on cutOff as well would throw the fade band away before this
-    // ever got to soften it.
-    float epsilon   = light.cutOff - light.outerCutOff;
-    float intensity = clamp((theta - light.outerCutOff) / epsilon, 0.0, 1.0);
-
-    vec3 norm = normalize(Normal);
-
-    float diff = max(dot(norm, lightDir), 0.0);
-    vec3 diffuse = light.diffuse * diff * DiffuseSample;
-
-    // In view space the eye is the origin too, so for a flashlight held at
-    // the camera viewDir and lightDir are literally the same vector.
-    vec3 viewDir = lightDir;
-    vec3 reflectDir = reflect(-lightDir, norm);
-
+    vec3 reflectDir = reflect(-lightDir, normal);
     float spec = pow(max(dot(viewDir, reflectDir), 0.0), material.shininess);
-    vec3 specular = light.specular * spec * texture(material.specular, TexCoords).rgb;
 
-    // Distance from the camera, which is where the light is.
-    float Distance = length(FragPos);
+    vec3 DiffuseSample = material.diffuseColor * texture(material.diffuse, TexCoords).rgb;
+
+    vec3 ambient  = light.ambient  * DiffuseSample;
+    vec3 diffuse  = light.diffuse  * diff * DiffuseSample;
+    vec3 specular = light.specular * spec * material.specularColor * texture(material.specular, TexCoords).rgb;
+
+    return ambient + diffuse + specular;
+}
+
+vec3 CalcPointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewDir)
+{
+    // Unlike the directional light, this one has a place, so every fragment
+    // gets its own direction to it - and its own distance.
+    vec3 lightDir = normalize(light.position - fragPos);
+
+    float diff = max(dot(normal, lightDir), 0.0);
+
+    vec3 reflectDir = reflect(-lightDir, normal);
+    float spec = pow(max(dot(viewDir, reflectDir), 0.0), material.shininess);
+
+    float Distance = length(light.position - fragPos);
     float attenuation = 1.0 / (light.constant +
                                light.linear * Distance +
                                light.quadratic * (Distance * Distance));
 
-    // Both scalars, so the order they are applied in does not matter.  Ambient
-    // gets neither, which is what keeps the scene outside the cone visible.
-    diffuse  *= attenuation * intensity;
-    specular *= attenuation * intensity;
+    vec3 DiffuseSample = material.diffuseColor * texture(material.diffuse, TexCoords).rgb;
 
-    FragColor = vec4(ambient + diffuse + specular, 1.0);
+    vec3 ambient  = light.ambient  * DiffuseSample;
+    vec3 diffuse  = light.diffuse  * diff * DiffuseSample;
+    vec3 specular = light.specular * spec * material.specularColor * texture(material.specular, TexCoords).rgb;
+
+    return (ambient + diffuse + specular) * attenuation;
+}
+
+vec3 CalcSpotLight(SpotLight light, vec3 normal, vec3 fragPos, vec3 viewDir)
+{
+    // Both constants - see the note on the struct.
+    const vec3 SpotDirection = vec3(0.0, 0.0, -1.0);
+    const vec3 SpotPosition  = vec3(0.0, 0.0,  0.0);
+
+    vec3 lightDir = normalize(SpotPosition - fragPos);
+
+    // NOTE(yigit): Cosine runs BACKWARDS.  A smaller angle gives a BIGGER
+    // cosine, so nearer the middle of the cone means a LARGER theta.
+    float theta = dot(lightDir, -SpotDirection);
+
+    // The clamp is the whole cone test - there is deliberately no if here:
+    //   inside the inner cone  -> theta large  -> clamps to 1, full light
+    //   in the band between    -> 0 .. 1       -> the soft edge
+    //   outside the outer cone -> theta small  -> clamps to 0, nothing
+    float epsilon   = light.cutOff - light.outerCutOff;
+    float intensity = clamp((theta - light.outerCutOff) / epsilon, 0.0, 1.0);
+
+    float diff = max(dot(normal, lightDir), 0.0);
+
+    vec3 reflectDir = reflect(-lightDir, normal);
+    float spec = pow(max(dot(viewDir, reflectDir), 0.0), material.shininess);
+
+    float Distance = length(SpotPosition - fragPos);
+    float attenuation = 1.0 / (light.constant +
+                               light.linear * Distance +
+                               light.quadratic * (Distance * Distance));
+
+    vec3 DiffuseSample = material.diffuseColor * texture(material.diffuse, TexCoords).rgb;
+
+    vec3 ambient  = light.ambient  * DiffuseSample;
+    vec3 diffuse  = light.diffuse  * diff * DiffuseSample;
+    vec3 specular = light.specular * spec * material.specularColor * texture(material.specular, TexCoords).rgb;
+
+    // Ambient is left out of the cone gate so the scene is never pitch black.
+    return ambient + (diffuse + specular) * attenuation * intensity;
+}
+
+void main()
+{
+    vec3 norm = normalize(Normal);
+
+    // The eye is the origin in view space, so "towards the viewer" is -FragPos.
+    vec3 viewDir = normalize(-FragPos);
+
+    // Book ch. 17.3 - contributions ADD, because light adds in the real world.
+    vec3 result = CalcDirLight(dirLight, norm, viewDir);
+
+    for(int i = 0; i < NR_POINT_LIGHTS; ++i)
+    {
+        result += CalcPointLight(pointLights[i], norm, FragPos, viewDir);
+    }
+
+    result += CalcSpotLight(spotLight, norm, FragPos, viewDir);
+
+    FragColor = vec4(result, 1.0);
 }

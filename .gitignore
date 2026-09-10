@@ -44,3 +44,8 @@ handmade/data/container2.png
 handmade/data/container2_specular.png
 handmade/data/matrix.jpg
 handmade/data/lighting_maps_specular_color.png
+
+# Models I did not make. cube.obj is mine and stays.
+handmade/data/peugeot.obj
+handmade/data/Car.Brake-Disk.BMP.png
+handmade/data/Tyre.png

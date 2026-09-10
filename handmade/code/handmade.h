@@ -106,6 +106,53 @@ InitializeArena(memory_arena *Arena, memory_index Size, uint8 *Base)
     Arena->Base = Base;
 }
 
+// Hands the whole block back at once.  Only safe when nothing still points
+// into the arena - which is the point of keeping model loading in an arena of
+// its own: once the vertices are on the GPU, every byte of it is free again.
+internal void
+ResetArena(memory_arena *Arena)
+{
+    Arena->Used = 0;
+}
+
+// NOTE(yigit): Needed here, not from handmade.cpp, because render_submesh now
+// holds an obj_material by value.  Everything it uses - the Push macros,
+// Assert, vec2/vec3 - is already in scope by this point.
+#include "handmade_obj.h"
+
+// A run of the index buffer sharing one material - a copy of obj_submesh that
+// survives the load, since the OBJ side of it lives in scratch memory.
+#define MAX_SUBMESHES_PER_MODEL 64
+
+struct render_submesh
+{
+    uint32 FirstIndex;
+    uint32 IndexCount;
+
+    // By value, not by index.  Submeshes are one-per-material by construction,
+    // so a separate material table would only ever be read one-to-one.
+    obj_material Material;
+
+    // 0 when the material named no texture, in which case the draw falls back
+    // to the 1x1 white texture and the colour comes from Material.Diffuse
+    // alone.
+    uint32 DiffuseTexture;
+};
+
+// One mesh as the GPU holds it.  The CPU-side vertex and index arrays are gone
+// by the time this exists - glBufferData copies them, so nothing has to be
+// kept around.
+struct render_model
+{
+    uint32 VAO;
+    uint32 VBO;
+    uint32 EBO;
+    uint32 IndexCount;
+
+    render_submesh Submeshes[MAX_SUBMESHES_PER_MODEL];
+    uint32 SubmeshCount;
+};
+
 // NOTE(yigit): Included here rather than from handmade.cpp because game_state
 // holds a camera by value.  It needs Pi32 and the internal macro, both defined
 // above.
@@ -131,20 +178,35 @@ struct game_state
     // !Memory->IsInitialized, then reused every frame
     uint32 ShaderProgram[2];
     shader_watch ShaderWatches[2];
-    uint32 VAO[2];
-    uint32 EBO;
-    uint32 VBO[1];
-    uint32 VertexCount;
-    uint32 Texture[2];
+
+    // NOTE(yigit): All geometry AND all textures are loaded from disk now.  The
+    // hand-written cube vertex table that used to live in GameInitOpenGL is
+    // gone, so are the ten hardcoded container positions, and so is the fixed
+    // container texture pair - a material names its own texture and the loader
+    // fetches it.
+    render_model Model;         // the subject of the scene
+    render_model MarkerModel;   // a small cube drawn at each point light
+
+    // NOTE(yigit): One white pixel.  Materials with no map_Kd bind this, and
+    // white times Kd is Kd - so the shader never has to ask whether a texture
+    // exists.  Cheaper than a branch, and it keeps one code path.
+    uint32 WhiteTexture;
 
     // NOTE(yigit): Everything in PermanentStorage that comes AFTER game_state
     // itself.  Set up once via InitializeArena - see the !IsInitialized block
     // in GameUpdateAndRender.
     memory_arena WorldArena;
 
-    // Cached uniform locations for the FPS camera matrices
-    int32 ViewUniformLocation;
-    int32 ProjectionUniformLocation;
+    // NOTE(yigit): Carved out of TransientStorage, and reset before every load.
+    // OBJ parsing needs hundreds of megabytes of scratch for a real model -
+    // far more than WorldArena holds - and none of it outlives the
+    // glBufferData call that copies the result to the GPU.
+    memory_arena TransientArena;
+
+    // NOTE(yigit): Two cached uniform locations used to live here.  They are
+    // gone because a location only survives as long as the linked program, and
+    // shader hot reload relinks on every save - so anything parked in
+    // PermanentStorage goes stale silently.  GameDrawModel caches per FRAME.
 
     // NOTE(yigit): By value, not a pointer - it lives in PermanentStorage, so
     // it survives DLL reloads and is captured by the input recording.

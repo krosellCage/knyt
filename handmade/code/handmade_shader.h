@@ -244,6 +244,55 @@ GameUpdateShaderPrograms(thread_context *Thread, game_memory *Memory,
      see the book's warning on p. 45.
 */
 
+/*
+  NOTE(yigit): The setters below take a NAME, which costs a glGetUniformLocation
+  - a string comparison inside the driver - on every single write.  Fine when a
+  uniform is set once a frame; wasteful when the same three are set once per
+  submesh, twenty-four times over.
+
+  These take a LOCATION instead, so the lookup can be hoisted out of a loop.
+  Two rules come with them:
+
+    1. They write to whatever program is currently bound.  The name-based
+       setters bind for you; these do not, so the caller must have called
+       glUseProgram already.
+
+    2. A location is only valid for one linked program.  Relinking - which
+       shader hot reload does every time a .frag is saved - invalidates it.
+       So look up per FRAME and reuse within the frame; never park a location
+       in PermanentStorage.
+*/
+
+inline int32
+GetUniformLocation(game_opengl_api *GL, uint32 Program, const char *Name)
+{
+    return(GL->glGetUniformLocation(Program, Name));
+}
+
+inline void
+SetUniformIntAt(game_opengl_api *GL, int32 Location, int32 Value)
+{
+    GL->glUniform1i(Location, Value);
+}
+
+inline void
+SetUniformFloatAt(game_opengl_api *GL, int32 Location, real32 Value)
+{
+    GL->glUniform1f(Location, Value);
+}
+
+inline void
+SetUniformVec3At(game_opengl_api *GL, int32 Location, vec3 V)
+{
+    GL->glUniform3f(Location, V.X, V.Y, V.Z);
+}
+
+inline void
+SetUniformMat4At(game_opengl_api *GL, int32 Location, mat4 Value)
+{
+    GL->glUniformMatrix4fv(Location, 1, GL_FALSE, Value.E);
+}
+
 internal void
 SetUniformBool(game_opengl_api *GL, uint32 Program, const char *Name, bool32 Value)
 {

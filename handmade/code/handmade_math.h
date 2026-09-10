@@ -124,6 +124,20 @@ inline struct mat4 Mat4RotationZ(real32 angle) {
     return M;
 }
 
+// NOTE(yigit): Added for OBJ texture coordinates.  Deliberately bare - no
+// operators until something actually needs one.
+struct vec2
+{
+    real32 X, Y;
+};
+
+inline vec2
+Vec2(real32 X, real32 Y)
+{
+    vec2 Result = {X, Y};
+    return(Result);
+}
+
 struct vec3
 {
     real32 X, Y, Z;

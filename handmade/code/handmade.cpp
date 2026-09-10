@@ -2,6 +2,12 @@
 #include "handmade_math.h"
 #include "handmade_shader.h"
 
+// NOTE(yigit): Only for snprintf, which builds the "pointLights[2].quadratic"
+// style uniform names in SetPointLightUniforms below.  The book concatenates
+// those with std::string; there is none here.
+#include <stdio.h>
+
+
 // NOTE(yigit): stb_image is third-party and does not compile clean under
 // -W4 -WX, so warnings are turned off across the include only.
 // STBI_NO_STDIO removes its file-opening path entirely, which forces image
@@ -77,156 +83,385 @@ GameLoadTexture(thread_context *Thread, game_memory *Memory, game_opengl_api *GL
     return(Result);
 }
 
-global_variable const vec3 GlobalLightPos = {1.2f, 1.0f, 2.0f};
+// Book ch. 17.1 - the sun.  World space, pointing INTO the scene: down and
+// slightly back-left, so it lights the tops of the containers.
+global_variable const vec3 GlobalDirLightDirection = {-0.2f, -1.0f, -0.3f};
 
-// NOTE(yigit): Same shape as GlobalShaderFiles in handmade_shader.h.  The
-// table order IS the order of game_state's Texture array, which is also the
-// texture unit each one gets bound to below.  Adding a texture is one line
-// here and one more slot in the array; no other code in this file changes.
-global_variable const char *GlobalTextureFiles[] =
+// Book ch. 17.3, p. 176 - four point lights scattered among the containers.
+// WORLD space; SetPointLightUniforms converts each one to view space.  A lamp
+// marker is drawn at each, so what you see is where the light is.
+global_variable const vec3 GlobalPointLightPositions[] =
 {
-    "data\\container2.png",           // unit 0 - diffuse map
-    "data\\container2_specular.png",  // unit 1 - specular map
+    { 0.7f,  0.2f,   2.0f},
+    { 2.3f, -3.3f,  -4.0f},
+    {-4.0f,  2.0f, -12.0f},
+    { 0.0f,  0.0f,  -3.0f},
 };
 
-// Book ch. 9.3, p. 96 - ten containers scattered through the scene.  The
-// geometry is the same 36 vertices drawn ten times; only the model matrix
-// differs, which is the whole point of the exercise.
-global_variable const vec3 GlobalCubePositions[] =
+// Steps 1-2 of the OBJ loader: prove the tokenizer walks the file and the
+// number parsers read it correctly, before any index de-duplication or GPU
+// upload exists.  cube.obj is written by hand so the expected numbers are
+// known: 8 / 4 / 6, six quads, which is 12 triangles and 24 face vertices
+// before merging.
+// Builds "data\Tyre.png" from "data\peugeot.obj" and "Tyre.png".
+//
+// NOTE(yigit): A .mtl names its textures relative to itself, not to the working
+// directory, so the model's own folder has to be pasted back on.  Without this
+// the loader looks for "Tyre.png" beside the executable and finds nothing.
+internal void
+ObjMakeSiblingFileName(char *Dest, uint32 DestSize, const char *ObjName,
+                       const char *SiblingName)
 {
-    { 0.0f,  0.0f,   0.0f},
-    { 2.0f,  5.0f, -15.0f},
-    {-1.5f, -2.2f,  -2.5f},
-    {-3.8f, -2.0f, -12.3f},
-    { 2.4f, -0.4f,  -3.5f},
-    {-1.7f,  3.0f,  -7.5f},
-    { 1.3f, -2.0f,  -2.5f},
-    { 1.5f,  2.0f,  -2.5f},
-    { 1.5f,  0.2f,  -1.5f},
-    {-1.3f,  1.0f,  -1.5f},
-};
+    uint32 DirLength = 0;
+    for(uint32 I = 0; ObjName[I]; ++I)
+    {
+        if((ObjName[I] == '\\') || (ObjName[I] == '/'))
+        {
+            DirLength = I + 1;
+        }
+    }
+
+    uint32 Length = 0;
+    while((Length < DirLength) && (Length < (DestSize - 1)))
+    {
+        Dest[Length] = ObjName[Length];
+        ++Length;
+    }
+
+    for(uint32 I = 0; SiblingName[I] && (Length < (DestSize - 1)); ++I)
+    {
+        Dest[Length++] = SiblingName[I];
+    }
+
+    Dest[Length] = 0;
+}
+
+// Turns "data\peugeot.obj" into "data\peugeot.mtl".
+//
+// NOTE(yigit): Derived from the model's own name rather than read from the
+// OBJ's "mtllib" line, which for this model names a file that was never
+// distributed with it.  The name beside the model is the one that exists.
+internal void
+ObjMakeMaterialFileName(char *Dest, uint32 DestSize, const char *ObjName)
+{
+    uint32 Length = 0;
+    while(ObjName[Length] && (Length < (DestSize - 1)))
+    {
+        Dest[Length] = ObjName[Length];
+        ++Length;
+    }
+    Dest[Length] = 0;
+
+    if((Length >= 4) &&
+       (Dest[Length-4] == '.') && (Dest[Length-3] == 'o') &&
+       (Dest[Length-2] == 'b') && (Dest[Length-1] == 'j'))
+    {
+        Dest[Length-3] = 'm';
+        Dest[Length-2] = 't';
+        Dest[Length-1] = 'l';
+    }
+}
+
+// Reads an OBJ, de-duplicates it into a vertex/index pair, and hands both to
+// the GPU.  Chapters 18-20 of the book, without Assimp.
+//
+// NOTE(yigit): Arena is scratch and gets RESET on entry, so the caller must
+// not keep anything in it.  A real model needs hundreds of megabytes to parse
+// and none of it survives this call - glBufferData copies the vertices, so the
+// CPU-side arrays are dead the moment they reach the GPU.
+internal render_model
+GameLoadModel(thread_context *Thread, game_memory *Memory, game_opengl_api *GL,
+              memory_arena *Arena, const char *FileName)
+{
+    render_model Result = {};
+
+    ResetArena(Arena);
+
+    debug_read_file_result File = Memory->DEBUGPlatformReadEntireFile(Thread, FileName);
+    if(!File.Contents)
+    {
+        Memory->DEBUGPlatformLog(Thread, "ERROR: Failed to read OBJ file: ");
+        Memory->DEBUGPlatformLog(Thread, FileName);
+        Memory->DEBUGPlatformLog(Thread, "\n");
+        return(Result);
+    }
+
+    loaded_model Model = ObjLoadModel(Arena, (char *)File.Contents, File.ContentsSize);
+
+    char Message[256];
+    snprintf(Message, sizeof(Message),
+             "%s: %u vertices, %u indices, %u triangles, %u submeshes, %u MB of scratch\n",
+             FileName, Model.VertexCount, Model.IndexCount, Model.IndexCount / 3,
+             Model.SubmeshCount, (uint32)(Arena->Used / (1024*1024)));
+    Memory->DEBUGPlatformLog(Thread, Message);
+
+    // NOTE(yigit): File.Contents is NOT freed here.  Model.Materials holds
+    // names that point straight into this buffer, and they are still needed to
+    // match against the .mtl below - freeing early is a use-after-free that
+    // would read whatever the allocator handed out next.
+    if(!Model.IndexCount)
+    {
+        Memory->DEBUGPlatformFreeFileMemory(Thread, File.Contents);
+        return(Result);
+    }
+
+    GL->glGenVertexArrays(1, &Result.VAO);
+    GL->glGenBuffers(1, &Result.VBO);
+    GL->glGenBuffers(1, &Result.EBO);
+
+    GL->glBindVertexArray(Result.VAO);
+
+    GL->glBindBuffer(GL_ARRAY_BUFFER, Result.VBO);
+    GL->glBufferData(GL_ARRAY_BUFFER, Model.VertexCount * sizeof(obj_vertex),
+                     Model.Vertices, GL_STATIC_DRAW);
+
+    // NOTE(yigit): Unlike GL_ARRAY_BUFFER, the ELEMENT buffer binding is stored
+    // IN THE VAO.  So it has to be bound while the VAO is bound, and it must
+    // not be unbound before the VAO is - unbind it first and the VAO forgets
+    // its index buffer and the model draws nothing.  Same ordering trap as the
+    // EBO in ch. 6.
+    GL->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, Result.EBO);
+    GL->glBufferData(GL_ELEMENT_ARRAY_BUFFER, Model.IndexCount * sizeof(uint32),
+                     Model.Indices, GL_STATIC_DRAW);
+
+    // obj_vertex was laid out to match an 8-float stride exactly, so these are
+    // the three usual calls with sizeof doing the arithmetic.
+    GL->glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(obj_vertex),
+                              (void *)0);
+    GL->glEnableVertexAttribArray(0);
+
+    GL->glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(obj_vertex),
+                              (void *)(3 * sizeof(real32)));
+    GL->glEnableVertexAttribArray(1);
+
+    GL->glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(obj_vertex),
+                              (void *)(6 * sizeof(real32)));
+    GL->glEnableVertexAttribArray(2);
+
+    GL->glBindVertexArray(0);
+
+    Result.IndexCount = Model.IndexCount;
+
+    // ---- Materials ------------------------------------------------------
+    //
+    // The .mtl is optional.  Without one every submesh keeps
+    // ObjDefaultMaterial's grey, which is visibly placeholder rather than
+    // invisible or black.
+    char MaterialFileName[256];
+    ObjMakeMaterialFileName(MaterialFileName, sizeof(MaterialFileName), FileName);
+
+    obj_material *Materials = PushArray(Arena, Model.MaterialCount, obj_material);
+    debug_read_file_result MaterialFile =
+        Memory->DEBUGPlatformReadEntireFile(Thread, MaterialFileName);
+
+    ObjParseMaterialLibrary((char *)MaterialFile.Contents, MaterialFile.ContentsSize,
+                            Model.Materials, Model.MaterialCount, Materials);
+
+    if(MaterialFile.Contents)
+    {
+        Memory->DEBUGPlatformFreeFileMemory(Thread, MaterialFile.Contents);
+    }
+    else
+    {
+        Memory->DEBUGPlatformLog(Thread, "  no material library at ");
+        Memory->DEBUGPlatformLog(Thread, MaterialFileName);
+        Memory->DEBUGPlatformLog(Thread, " - using defaults\n");
+    }
+
+    // The OBJ-side submesh list lives in scratch that the next load resets, so
+    // it is copied into the render_model rather than pointed at.
+    for(uint32 I = 0; I < Model.SubmeshCount; ++I)
+    {
+        if(Result.SubmeshCount >= MAX_SUBMESHES_PER_MODEL)
+        {
+            Memory->DEBUGPlatformLog(Thread, "WARNING: submesh limit hit, tail dropped\n");
+            break;
+        }
+
+        render_submesh *Submesh = Result.Submeshes + Result.SubmeshCount++;
+        Submesh->FirstIndex = Model.Submeshes[I].FirstIndex;
+        Submesh->IndexCount = Model.Submeshes[I].IndexCount;
+        Submesh->Material = Materials[Model.Submeshes[I].MaterialIndex];
+        Submesh->DiffuseTexture = 0;
+
+        if(Submesh->Material.HasDiffuseMap)
+        {
+            // NOTE(yigit): Two materials naming the same file must not upload
+            // it twice.  Submeshes already loaded are the cache - a linear scan
+            // over a few dozen of them, which is cheaper than any structure
+            // built to avoid it.
+            for(uint32 J = 0; J < (Result.SubmeshCount - 1); ++J)
+            {
+                render_submesh *Other = Result.Submeshes + J;
+                if(Other->DiffuseTexture &&
+                   ObjNamesMatch2(Other->Material.DiffuseMapName,
+                                  Submesh->Material.DiffuseMapName))
+                {
+                    Submesh->DiffuseTexture = Other->DiffuseTexture;
+                    break;
+                }
+            }
+
+            if(!Submesh->DiffuseTexture)
+            {
+                char TextureFileName[256];
+                ObjMakeSiblingFileName(TextureFileName, sizeof(TextureFileName),
+                                       FileName, Submesh->Material.DiffuseMapName);
+
+                Submesh->DiffuseTexture = GameLoadTexture(Thread, Memory, GL,
+                                                          TextureFileName, GL_REPEAT);
+            }
+        }
+    }
+
+    // Safe now - every name has been resolved into a material by value.
+    Memory->DEBUGPlatformFreeFileMemory(Thread, File.Contents);
+
+    return(Result);
+}
+
+// Makes the fallback texture: a single white pixel.
+internal uint32
+GameCreateWhiteTexture(game_opengl_api *GL)
+{
+    uint32 Result = 0;
+    uint8 White[4] = {255, 255, 255, 255};
+
+    GL->glGenTextures(1, &Result);
+    GL->glBindTexture(GL_TEXTURE_2D, Result);
+    GL->glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    GL->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, White);
+
+    return(Result);
+}
+
+// Draws one loaded model, a submesh at a time, setting that submesh's material
+// before each call.
+//
+// NOTE(yigit): One glDrawElements per material rather than one per model.  A
+// material change is a uniform change, and uniforms cannot vary within a draw -
+// which is the whole reason the index buffer was reordered by material.
+internal void
+GameDrawModel(game_opengl_api *GL, uint32 Program, render_model *Model,
+              mat4 ModelMatrix, uint32 WhiteTexture)
+{
+    if(!Model->IndexCount)
+    {
+        return;
+    }
+
+    // The At-setters below write to whatever program is bound, so this has to
+    // happen before any of them - and it replaces the glUseProgram the
+    // name-based setters used to do on every single write.
+    GL->glUseProgram(Program);
+    GL->glBindVertexArray(Model->VAO);
+
+    // NOTE(yigit): Hoisted out of the loop.  A uniform's location is fixed for
+    // the life of a linked program, and these four do not change between the
+    // submeshes below - so a model with 24 materials goes from 96 driver string
+    // lookups a frame to 4.
+    //
+    // Looked up per frame rather than cached in game_state on purpose: shader
+    // hot reload relinks the program, and every location from the old one is
+    // then meaningless.
+    int32 ModelLocation         = GetUniformLocation(GL, Program, "model");
+    int32 DiffuseColorLocation  = GetUniformLocation(GL, Program, "material.diffuseColor");
+    int32 SpecularColorLocation = GetUniformLocation(GL, Program, "material.specularColor");
+    int32 ShininessLocation     = GetUniformLocation(GL, Program, "material.shininess");
+
+    SetUniformMat4At(GL, ModelLocation, ModelMatrix);
+
+    for(uint32 SubmeshIndex = 0;
+        SubmeshIndex < Model->SubmeshCount;
+        ++SubmeshIndex)
+    {
+        render_submesh *Submesh = Model->Submeshes + SubmeshIndex;
+        obj_material *Material = &Submesh->Material;
+
+        SetUniformVec3At(GL, DiffuseColorLocation, Material->Diffuse);
+        SetUniformVec3At(GL, SpecularColorLocation, Material->Specular);
+        SetUniformFloatAt(GL, ShininessLocation, Material->Shininess);
+
+        // White when the material named no texture, so the multiply in the
+        // shader leaves Kd untouched.
+        uint32 DiffuseTexture = Submesh->DiffuseTexture
+            ? Submesh->DiffuseTexture
+            : WhiteTexture;
+
+        GL->glActiveTexture(GL_TEXTURE0);
+        GL->glBindTexture(GL_TEXTURE_2D, DiffuseTexture);
+        GL->glActiveTexture(GL_TEXTURE1);
+        GL->glBindTexture(GL_TEXTURE_2D, WhiteTexture);
+
+        // The last argument is a byte OFFSET into the bound element buffer,
+        // not a pointer - a leftover from when this call could read indices
+        // straight out of client memory.  It was 0 while there was one draw
+        // per model; now it is where this material's run begins.
+        GL->glDrawElements(GL_TRIANGLES, (int32)Submesh->IndexCount, GL_UNSIGNED_INT,
+                           (void *)(memory_index)(Submesh->FirstIndex * sizeof(uint32)));
+    }
+}
+
 
 internal void
 GameInitOpenGL(thread_context *Thread, game_memory *Memory, game_state *State, game_opengl_api *GL)
 {
-    // The table and the array have to stay the same length, or the loop below
-    // walks off the end of one of them.
-    Assert(ArrayCount(GlobalTextureFiles) == ArrayCount(State->Texture));
-    for(uint32 TextureIndex = 0;
-        TextureIndex < ArrayCount(GlobalTextureFiles);
-        ++TextureIndex)
-    {
-        State->Texture[TextureIndex] = GameLoadTexture(Thread, Memory, GL,
-                                                       GlobalTextureFiles[TextureIndex],
-                                                       GL_REPEAT);
-    }
+    // NOTE(yigit): Both meshes come off disk now.  The 36-vertex cube table
+    // that used to sit here - six faces written out by hand with their normals
+    // - is gone, and so are the ten hardcoded container positions.  Anything
+    // that wants a cube loads cube.obj.
+    State->Model = GameLoadModel(Thread, Memory, GL, &State->TransientArena,
+                                 "data\\peugeot.obj");
+    State->WhiteTexture = GameCreateWhiteTexture(GL);
+
+    State->MarkerModel = GameLoadModel(Thread, Memory, GL, &State->TransientArena,
+                                       "data\\cube.obj");
 
     // NOTE(yigit): Required now that there is a solid object.  Without it the
     // back faces draw over the front ones in whatever order they happen to be
-    // listed, and the cube looks turned inside out.  The depth buffer is
+    // listed, and the object looks turned inside out.  The depth buffer is
     // already cleared every frame and the context already has 24 depth bits.
     GL->glEnable(GL_DEPTH_TEST);
-
-    // Geometry: a cube as 36 loose vertices - six faces, two triangles each,
-    // three corners each.  No index buffer: every face needs its own texture
-    // coordinates, so corners shared in space are NOT shared in the buffer.
-    // That is why the book stops using an EBO here.
-    //
-    // Each vertex is 8 floats - position, normal, texture coordinate - so the
-    // stride is 32 bytes.  Book ch. 13.3, p. 117.
-    //
-    // NOTE(yigit): A normal is the direction a surface faces.  A single vertex
-    // has no surface of its own, so on a general mesh you would derive them
-    // from the neighbouring triangles - but a cube is six flat planes, so every
-    // vertex on a face just gets that face's outward direction, written by
-    // hand.  Look down each block below and the normal never changes: the six
-    // faces are (0,0,-1), (0,0,1), (-1,0,0), (1,0,0), (0,-1,0), (0,1,0).
-    //
-    // This is also why the cube needs 36 loose vertices rather than 8 shared
-    // ones: a corner belongs to three faces pointing three different ways, and
-    // it can only carry one normal.
-    float Vertices[] = {
-        // positions          // normals           // tex coords
-        -0.5f, -0.5f, -0.5f,   0.0f,  0.0f, -1.0f,  0.0f, 0.0f,
-         0.5f, -0.5f, -0.5f,   0.0f,  0.0f, -1.0f,  1.0f, 0.0f,
-         0.5f,  0.5f, -0.5f,   0.0f,  0.0f, -1.0f,  1.0f, 1.0f,
-         0.5f,  0.5f, -0.5f,   0.0f,  0.0f, -1.0f,  1.0f, 1.0f,
-        -0.5f,  0.5f, -0.5f,   0.0f,  0.0f, -1.0f,  0.0f, 1.0f,
-        -0.5f, -0.5f, -0.5f,   0.0f,  0.0f, -1.0f,  0.0f, 0.0f,
-
-        -0.5f, -0.5f,  0.5f,   0.0f,  0.0f,  1.0f,  0.0f, 0.0f,
-         0.5f, -0.5f,  0.5f,   0.0f,  0.0f,  1.0f,  1.0f, 0.0f,
-         0.5f,  0.5f,  0.5f,   0.0f,  0.0f,  1.0f,  1.0f, 1.0f,
-         0.5f,  0.5f,  0.5f,   0.0f,  0.0f,  1.0f,  1.0f, 1.0f,
-        -0.5f,  0.5f,  0.5f,   0.0f,  0.0f,  1.0f,  0.0f, 1.0f,
-        -0.5f, -0.5f,  0.5f,   0.0f,  0.0f,  1.0f,  0.0f, 0.0f,
-
-        -0.5f,  0.5f,  0.5f,  -1.0f,  0.0f,  0.0f,  1.0f, 0.0f,
-        -0.5f,  0.5f, -0.5f,  -1.0f,  0.0f,  0.0f,  1.0f, 1.0f,
-        -0.5f, -0.5f, -0.5f,  -1.0f,  0.0f,  0.0f,  0.0f, 1.0f,
-        -0.5f, -0.5f, -0.5f,  -1.0f,  0.0f,  0.0f,  0.0f, 1.0f,
-        -0.5f, -0.5f,  0.5f,  -1.0f,  0.0f,  0.0f,  0.0f, 0.0f,
-        -0.5f,  0.5f,  0.5f,  -1.0f,  0.0f,  0.0f,  1.0f, 0.0f,
-
-         0.5f,  0.5f,  0.5f,   1.0f,  0.0f,  0.0f,  1.0f, 0.0f,
-         0.5f,  0.5f, -0.5f,   1.0f,  0.0f,  0.0f,  1.0f, 1.0f,
-         0.5f, -0.5f, -0.5f,   1.0f,  0.0f,  0.0f,  0.0f, 1.0f,
-         0.5f, -0.5f, -0.5f,   1.0f,  0.0f,  0.0f,  0.0f, 1.0f,
-         0.5f, -0.5f,  0.5f,   1.0f,  0.0f,  0.0f,  0.0f, 0.0f,
-         0.5f,  0.5f,  0.5f,   1.0f,  0.0f,  0.0f,  1.0f, 0.0f,
-
-        -0.5f, -0.5f, -0.5f,   0.0f, -1.0f,  0.0f,  0.0f, 1.0f,
-         0.5f, -0.5f, -0.5f,   0.0f, -1.0f,  0.0f,  1.0f, 1.0f,
-         0.5f, -0.5f,  0.5f,   0.0f, -1.0f,  0.0f,  1.0f, 0.0f,
-         0.5f, -0.5f,  0.5f,   0.0f, -1.0f,  0.0f,  1.0f, 0.0f,
-        -0.5f, -0.5f,  0.5f,   0.0f, -1.0f,  0.0f,  0.0f, 0.0f,
-        -0.5f, -0.5f, -0.5f,   0.0f, -1.0f,  0.0f,  0.0f, 1.0f,
-
-        -0.5f,  0.5f, -0.5f,   0.0f,  1.0f,  0.0f,  0.0f, 1.0f,
-         0.5f,  0.5f, -0.5f,   0.0f,  1.0f,  0.0f,  1.0f, 1.0f,
-         0.5f,  0.5f,  0.5f,   0.0f,  1.0f,  0.0f,  1.0f, 0.0f,
-         0.5f,  0.5f,  0.5f,   0.0f,  1.0f,  0.0f,  1.0f, 0.0f,
-        -0.5f,  0.5f,  0.5f,   0.0f,  1.0f,  0.0f,  0.0f, 0.0f,
-        -0.5f,  0.5f, -0.5f,   0.0f,  1.0f,  0.0f,  0.0f, 1.0f
-    };
-
-    State->VertexCount = ArrayCount(Vertices) / 8;
-
-    GL->glGenBuffers(ArrayCount(State->VBO), State->VBO);
-    GL->glGenVertexArrays(ArrayCount(State->VAO), State->VAO);
-
-    // ---------------------------------------------------------------------
-    // VAO[0] - the container.  Owns the buffer upload.
-    // ---------------------------------------------------------------------
-    GL->glBindVertexArray(State->VAO[0]);
-
-    GL->glBindBuffer(GL_ARRAY_BUFFER, State->VBO[0]);
-    GL->glBufferData(GL_ARRAY_BUFFER, sizeof(Vertices), Vertices, GL_STATIC_DRAW);
-
-    // Attribute 0 - aPos, 3 floats at offset 0
-    GL->glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
-    GL->glEnableVertexAttribArray(0);
-
-    // Attribute 1 - aNormal, 3 floats at offset 12
-    GL->glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(3 * sizeof(float)));
-    GL->glEnableVertexAttribArray(1);
-
-    // Attribute 2 - aTexCoord, 2 floats at offset 24
-    GL->glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)(6 * sizeof(float)));
-    GL->glEnableVertexAttribArray(2);
-
-    GL->glBindVertexArray(State->VAO[1]);
-
-    GL->glBindBuffer(GL_ARRAY_BUFFER, State->VBO[0]);
-    GL->glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 8 * sizeof(float), (void*)0);
-    GL->glEnableVertexAttribArray(0);
-
-    GL->glBindVertexArray(0);
 }
 
 // Everything the container's shader needs except the model matrix, which
 // changes per draw and so stays at the call site.  Pulled out of
 // GameUpdateAndRender because the run of calls said nothing the name does not.
+// Book ch. 17.3 - the uniform names here are "pointLights[2].quadratic" and
+// friends.  The book builds them with std::string concatenation; with no
+// std::string in this layer they are formatted into a scratch buffer instead.
+//
+// NOTE(yigit): A local buffer is safe because glGetUniformLocation copies the
+// name it is handed - nothing keeps a pointer to it after the call returns.
+internal void
+SetPointLightUniforms(game_opengl_api *GL, uint32 Program, uint32 Index,
+                      vec3 PositionView)
+{
+    char Name[64];
+
+    snprintf(Name, sizeof(Name), "pointLights[%u].position", Index);
+    SetUniformVec3(GL, Program, Name, PositionView);
+
+    // Book ch. 16.2 - the table row for a range of about 50 units.
+    snprintf(Name, sizeof(Name), "pointLights[%u].constant", Index);
+    SetUniformFloat(GL, Program, Name, 1.0f);
+    snprintf(Name, sizeof(Name), "pointLights[%u].linear", Index);
+    SetUniformFloat(GL, Program, Name, 0.09f);
+    snprintf(Name, sizeof(Name), "pointLights[%u].quadratic", Index);
+    SetUniformFloat(GL, Program, Name, 0.032f);
+
+    snprintf(Name, sizeof(Name), "pointLights[%u].ambient", Index);
+    SetUniformVec3(GL, Program, Name, 0.05f, 0.05f, 0.05f);
+    snprintf(Name, sizeof(Name), "pointLights[%u].diffuse", Index);
+    SetUniformVec3(GL, Program, Name, 0.8f, 0.8f, 0.8f);
+    snprintf(Name, sizeof(Name), "pointLights[%u].specular", Index);
+    SetUniformVec3(GL, Program, Name, 1.0f, 1.0f, 1.0f);
+}
+
 internal void
 SetLitUniforms(game_opengl_api *GL, uint32 Program,
                mat4 View, mat4 Projection,
@@ -235,26 +470,58 @@ SetLitUniforms(game_opengl_api *GL, uint32 Program,
     SetUniformMat4(GL, Program, "view", View);
     SetUniformMat4(GL, Program, "projection", Projection);
 
-    // The MATERIAL is the surface itself.  Its colours come from the maps
-    // bound before the draw, so only shininess is left as a plain uniform.
-    SetUniformFloat(GL, Program, "material.shininess", 32.0f);
+    // NOTE(yigit): material.shininess, diffuseColor and specularColor are NOT
+    // set here any more - they vary per submesh, so GameDrawModel sets them
+    // immediately before each draw.
 
-    // The LIGHT is what changes.  Book ch. 14.3 puts the animated colours here,
-    // not on the material - the lamp is changing colour, the paint is not.
-    SetUniformVec3(GL, Program, "light.ambient",  AmbientColor);
-    SetUniformVec3(GL, Program, "light.diffuse",  DiffuseColor);
-    SetUniformVec3(GL, Program, "light.specular", 1.0f, 1.0f, 1.0f);
-    SetUniformFloat(GL, Program, "light.constant", 1.0f);
+    // The SPOTLIGHT - the flashlight held at the camera.  It needs no position
+    // or direction uniform: in view space the camera is the origin looking down
+    // -Z, so the shader has both as constants.
+    SetUniformVec3(GL, Program, "spotLight.ambient",  AmbientColor);
+    SetUniformVec3(GL, Program, "spotLight.diffuse",  DiffuseColor);
+    SetUniformVec3(GL, Program, "spotLight.specular", 1.0f, 1.0f, 1.0f);
+
     // Book ch. 16.2 - the table row for a range of about 50 units.  The
     // 3250-unit row (0.0014 / 0.000007) gives no visible falloff in a scene
     // this small.
-    SetUniformFloat(GL, Program, "light.linear", 0.09f);
-    SetUniformFloat(GL, Program, "light.quadratic", 0.032f);
+    SetUniformFloat(GL, Program, "spotLight.constant", 1.0f);
+    SetUniformFloat(GL, Program, "spotLight.linear", 0.09f);
+    SetUniformFloat(GL, Program, "spotLight.quadratic", 0.032f);
 
     // Cos takes RADIANS.  Passing 12.5 raw is 12.5 radians, which works out as
     // a 3.8 degree cone - wrong, but close enough to look plausible.
-    SetUniformFloat(GL, Program, "light.cutOff", Cos(12.5f*Pi32 / 180.0f));
-    SetUniformFloat(GL, Program, "light.outerCutOff", Cos(17.5f*Pi32 / 180.0f));
+    SetUniformFloat(GL, Program, "spotLight.cutOff", Cos(12.5f*Pi32 / 180.0f));
+    SetUniformFloat(GL, Program, "spotLight.outerCutOff", Cos(17.5f*Pi32 / 180.0f));
+
+    // Book ch. 17.1 - the directional light.  Its direction is given in WORLD
+    // space and has to reach the shader in VIEW space, like everything else in
+    // this pipeline.
+    //
+    // NOTE(yigit): W is 0, not 1.  A direction has no location, so the view
+    // matrix's translation column must not touch it - the same reason the
+    // vertex shader used mat3(view) back when this lived there.
+    vec4 DirView = View * Vec4(GlobalDirLightDirection, 0.0f);
+    SetUniformVec3(GL, Program, "dirLight.direction",
+                   Vec3(DirView.X, DirView.Y, DirView.Z));
+
+    SetUniformVec3(GL, Program, "dirLight.ambient",  0.05f, 0.05f, 0.05f);
+    SetUniformVec3(GL, Program, "dirLight.diffuse",  0.4f,  0.4f,  0.4f);
+    SetUniformVec3(GL, Program, "dirLight.specular", 0.5f,  0.5f,  0.5f);
+
+    // Book ch. 17.2 - the four point lights.
+    //
+    // NOTE(yigit): W is 1 here, not 0.  A position DOES get slid by the view
+    // matrix's translation - that is the entire difference from the direction
+    // above, and getting it backwards is the classic way to end up with lights
+    // that drift as the camera moves.
+    for(uint32 LightIndex = 0;
+        LightIndex < ArrayCount(GlobalPointLightPositions);
+        ++LightIndex)
+    {
+        vec4 PosView = View * Vec4(GlobalPointLightPositions[LightIndex], 1.0f);
+        SetPointLightUniforms(GL, Program, LightIndex,
+                              Vec3(PosView.X, PosView.Y, PosView.Z));
+    }
 
 
     // Which texture unit each sampler reads from.  Constant, but uniforms do
@@ -298,6 +565,14 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
         InitializeArena(&State->WorldArena,
                         (memory_index)(Memory->PermanentStorageSize - sizeof(game_state)),
                         (uint8 *)Memory->PermanentStorage + sizeof(game_state));
+
+        // NOTE(yigit): Model loading needs far more scratch than WorldArena
+        // holds - the car alone parses to a couple of hundred megabytes - and
+        // none of it outlives the upload to the GPU.  TransientStorage is a
+        // whole gigabyte and was sitting unused.
+        InitializeArena(&State->TransientArena,
+                        (memory_index)Memory->TransientStorageSize,
+                        (uint8 *)Memory->TransientStorage);
 
         // NOTE(yigit): PermanentStorage starts zeroed, so these would be all
         // zeros - and a zero-length CameraFront would make LookAt degenerate.
@@ -402,13 +677,6 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     vec3 DiffuseColor = LightColor * 0.5f;
     vec3 AmbientColor = DiffuseColor * 0.2f;
 
-    for(uint32 TextureIndex = 0;
-        TextureIndex < ArrayCount(State->Texture);
-        ++TextureIndex)
-    {
-        GL->glActiveTexture(GL_TEXTURE0 + TextureIndex);
-        GL->glBindTexture(GL_TEXTURE_2D, State->Texture[TextureIndex]);
-    }
 
     // NOTE(yigit): Named here rather than spelled State->ShaderProgram[N] at
     // every call site.  The names say which program is which; the array index
@@ -417,48 +685,37 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     uint32 LampProgram = State->ShaderProgram[1];
 
     // ---------------------------------------------------------------------
-    // The lit objects
+    // The model
     // ---------------------------------------------------------------------
     SetLitUniforms(GL, LitProgram, View, Projection, AmbientColor, DiffuseColor);
 
     GL->glUseProgram(LitProgram);
-    GL->glBindVertexArray(State->VAO[0]);
 
-    // Model is the only uniform that changes between the ten draws, which is
-    // why SetLitUniforms runs once above the loop and this one is set inside.
-    for(uint32 CubeIndex = 0;
-        CubeIndex < ArrayCount(GlobalCubePositions);
-        ++CubeIndex)
-    {
-        vec3 P = GlobalCubePositions[CubeIndex];
-
-        // Rotation on the RIGHT so it happens first: spin the cube about its
-        // own centre, then move it out to P.  The other order would swing it
-        // around the world origin instead - the same trap as the light marker
-        // below.  The axis need not be unit length; Mat4RotationAxis
-        // normalizes it.
-        real32 Angle = (20.0f*(real32)CubeIndex) * (Pi32 / 180.0f);
-        mat4 Model = Mat4Mul(Mat4Translation(P.X, P.Y, P.Z),
-                             Mat4RotationAxis(Vec3(1.0f, 0.3f, 0.5f), Angle));
-
-        SetUniformMat4(GL, LitProgram, "model", Model);
-
-        GL->glDrawArrays(GL_TRIANGLES, 0, State->VertexCount);
-    }
+    // The model sits where the file put it - the fly camera is how you look
+    // around it.
+    GameDrawModel(GL, LitProgram, &State->Model, Mat4Identity(), State->WhiteTexture);
 
     // ---------------------------------------------------------------------
-    // The light marker
+    // The light markers - one per point light, so you can see where they are
     // ---------------------------------------------------------------------
-
-    // Scale on the RIGHT so it happens first: shrink the cube at the origin,
-    // then move it out to the light.  The other order would scale the
-    // translation too and put the marker at a fifth of the distance.
-    
     SetLampUniforms(GL, LampProgram, View, Projection, LightColor);
 
     GL->glUseProgram(LampProgram);
-    GL->glBindVertexArray(State->VAO[1]);
-    GL->glDrawArrays(GL_TRIANGLES, 0, State->VertexCount);
+
+    for(uint32 LightIndex = 0;
+        LightIndex < ArrayCount(GlobalPointLightPositions);
+        ++LightIndex)
+    {
+        vec3 P = GlobalPointLightPositions[LightIndex];
+
+        // Scale on the RIGHT so it happens first: shrink the cube at the
+        // origin, then move it out to the light.  The other order would scale
+        // the translation too and put the marker at a fifth of the distance.
+        GameDrawModel(GL, LampProgram, &State->MarkerModel,
+                      Mat4Mul(Mat4Translation(P.X, P.Y, P.Z),
+                              Mat4Scale(0.2f, 0.2f, 0.2f)),
+                      State->WhiteTexture);
+    }
 
     GL->glBindVertexArray(0);
 

@@ -83,7 +83,8 @@ xcb_handmade, by Neil Blakey-Milner and contributors (BSD licensed)
 5. ASSETS
 ===============================================================================
 
-No textures, audio or PDFs are distributed in this repository.  They are
-gitignored, and the README lists the ones the renderer expects with links to
-their sources.  The container textures from LearnOpenGL are CC BY 4.0.  Nothing
-here grants any right to them.
+No models, textures, audio or PDFs are distributed in this repository.  They
+are gitignored, and the README lists the ones the renderer expects with links
+to their sources.  cube.obj and peugeot.mtl are the exceptions - both written
+here, and covered by section 1.  Nothing here grants any right to anything
+else.
