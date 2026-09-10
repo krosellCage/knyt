@@ -134,24 +134,37 @@ This is a learning project and it stands on other people's work.
 - **[stb_image](https://github.com/nothings/stb)** by Sean Barrett, public
   domain. Image decoding.
 
+- **Crytek Sponza**, the default test scene. Modelled by Frank Meinl at Crytek
+  from Marko Dabrovic's 2002 original, and "donated to the public" per the
+  copyright notice bundled with it. Distributed by Morgan McGuire at
+  [casual-effects.com/data](https://casual-effects.com/data), who corrected the
+  export and generated the bump maps. Not redistributed here.
+
 ### Assets
 
 `handmade/data` holds the shaders, `cube.obj` and `peugeot.mtl` — all written
-here. The model itself is not mine to redistribute, so it is gitignored and has
-to be fetched:
+here. Models are not mine to redistribute, so they are gitignored and have to
+be fetched.
 
-| file | where to get it |
-|---|---|
-| `peugeot.obj` | Peugeot Onyx Concept, free on [Sketchfab](https://sketchfab.com) / [Free3D](https://free3d.com). Rename the `.obj` to `peugeot.obj` |
-| `Tyre.png`, `Car.Brake-Disk.BMP.png` | ship alongside that model |
+**The default scene is Crytek Sponza**, the standard graphics test atrium:
 
-`peugeot.mtl` is written by hand, because that model was distributed without
-one. Its material names match the OBJ's `usemtl` lines; the colour values are
-chosen to look right, not measured.
+```sh
+curl -O https://casual-effects.com/g3d/data10/common/model/crytek_sponza/sponza.zip
+unzip sponza.zip -d handmade/data
+```
 
-Any OBJ works — point `GameInitOpenGL` at a different file. Without one the
-load fails, logs which file it could not read, and the scene renders empty
-rather than crashing.
+That gives you `sponza.obj`, `sponza.mtl` and a `textures/` folder — 25
+materials, 262k triangles, texture coordinates on every face. It is scaled to
+`0.02` at draw time because it is modelled at roughly 3700 units across and the
+far plane is 100.
+
+Any OBJ works — point `GameInitOpenGL` at a different file. The tree also
+carries a hand-written `peugeot.mtl` for the Peugeot Onyx Concept (free on
+[Sketchfab](https://sketchfab.com)), which ships without a material library of
+its own; rename that model to `peugeot.obj` to use it.
+
+Without a model the load fails, logs which file it could not read, and the
+scene renders empty rather than crashing.
 
 ## License
 

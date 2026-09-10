@@ -415,7 +415,7 @@ GameInitOpenGL(thread_context *Thread, game_memory *Memory, game_state *State, g
     // - is gone, and so are the ten hardcoded container positions.  Anything
     // that wants a cube loads cube.obj.
     State->Model = GameLoadModel(Thread, Memory, GL, &State->TransientArena,
-                                 "data\\peugeot.obj");
+                                 "data\\sponza.obj");
     State->WhiteTexture = GameCreateWhiteTexture(GL);
 
     State->MarkerModel = GameLoadModel(Thread, Memory, GL, &State->TransientArena,
@@ -691,9 +691,13 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
 
     GL->glUseProgram(LitProgram);
 
-    // The model sits where the file put it - the fly camera is how you look
-    // around it.
-    GameDrawModel(GL, LitProgram, &State->Model, Mat4Identity(), State->WhiteTexture);
+    // NOTE(yigit): Sponza is modelled at roughly 3700 x 1550 x 2300 units and
+    // the projection has a far plane of 100, so at native scale the whole
+    // atrium sits outside the frustum.  Scaling the model is the right fix
+    // rather than pushing the far plane out to 5000, which would spend the
+    // depth buffer on empty space and bring back z-fighting.
+    GameDrawModel(GL, LitProgram, &State->Model,
+                  Mat4Scale(0.02f, 0.02f, 0.02f), State->WhiteTexture);
 
     // ---------------------------------------------------------------------
     // The light markers - one per point light, so you can see where they are

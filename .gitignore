@@ -49,3 +49,8 @@ handmade/data/lighting_maps_specular_color.png
 handmade/data/peugeot.obj
 handmade/data/Car.Brake-Disk.BMP.png
 handmade/data/Tyre.png
+
+# Sponza - Crytek/Frank Meinl, via casual-effects.com. Not mine to redistribute.
+handmade/data/sponza.obj
+handmade/data/sponza.mtl
+handmade/data/textures/
