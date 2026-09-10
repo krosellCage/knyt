@@ -708,7 +708,12 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     }
 
     mat4 View = CameraGetViewMatrix(&State->Camera);
-    mat4 Projection = Mat4Perspective(State->Camera.Zoom, Aspect, 0.1f, 100.0f);
+    // NOTE(yigit): NEAR is the lever here, not far.  The depth buffer is
+    // non-linear, and the smallest distance it can resolve at depth z is
+    // roughly z*z / (near * 2^24) - far barely appears in that at all.  Moving
+    // near from 0.1 to 0.5 buys five times the usable range for nothing, which
+    // is why far can go to 500 without z-fighting coming back.
+    mat4 Projection = Mat4Perspective(State->Camera.Zoom, Aspect, 0.5f, 500.0f);
 
     // ------------------------------------------------------------------
     // Render
