@@ -85,6 +85,8 @@ typedef unsigned int   GLbitfield;
 #define GL_NEAREST_MIPMAP_LINEAR    0x2702
 #define GL_LINEAR_MIPMAP_LINEAR     0x2703
 // Pixel formats for glTexImage2D
+#define GL_RED                      0x1903
+#define GL_RG                       0x8227
 #define GL_RGB                      0x1907
 #define GL_RGBA                     0x1908
 #define GL_UNSIGNED_BYTE            0x1401

@@ -55,7 +55,22 @@ GameLoadTexture(thread_context *Thread, game_memory *Memory, game_opengl_api *GL
 
     if(Pixels)
     {
-        uint32 Format = (ChannelCount == 4) ? GL_RGBA : GL_RGB;
+        // NOTE(yigit): One and two channel images are real - Sponza ships its
+        // alpha masks as greyscale PNGs.  Assuming three channels for anything
+        // that is not RGBA reads three bytes per pixel out of a buffer holding
+        // one, which walks off the end of the allocation.
+        //
+        // GL_UNPACK_ALIGNMENT is 1 below, which matters here: a greyscale row
+        // is rarely a multiple of four bytes, and the default alignment of 4
+        // would shear the image.
+        uint32 Format = GL_RGB;
+        switch(ChannelCount)
+        {
+            case 1: { Format = GL_RED; } break;
+            case 2: { Format = GL_RG; } break;
+            case 3: { Format = GL_RGB; } break;
+            case 4: { Format = GL_RGBA; } break;
+        }
 
         GL->glGenTextures(1, &Result);
         GL->glBindTexture(GL_TEXTURE_2D, Result);
@@ -160,6 +175,41 @@ ObjMakeMaterialFileName(char *Dest, uint32 DestSize, const char *ObjName)
         Dest[Length-2] = 't';
         Dest[Length-1] = 'l';
     }
+}
+
+// Loads a texture named by a material, reusing one already uploaded if an
+// earlier submesh named the same file.
+//
+// NOTE(yigit): The submeshes built so far ARE the cache - a linear scan over a
+// few dozen of them, cheaper than any structure built to avoid it.  It checks
+// BOTH name fields, because one material's diffuse map can be another
+// material's alpha mask, and uploading it twice would be silent waste.
+internal uint32
+GameLoadMaterialTexture(thread_context *Thread, game_memory *Memory, game_opengl_api *GL,
+                        const char *ObjFileName, const char *MapName,
+                        render_submesh *Submeshes, uint32 SubmeshCount)
+{
+    for(uint32 I = 0; I < SubmeshCount; ++I)
+    {
+        render_submesh *Other = Submeshes + I;
+
+        if(Other->DiffuseTexture &&
+           ObjNamesMatch2(Other->Material.DiffuseMapName, MapName))
+        {
+            return(Other->DiffuseTexture);
+        }
+
+        if(Other->AlphaTexture &&
+           ObjNamesMatch2(Other->Material.AlphaMapName, MapName))
+        {
+            return(Other->AlphaTexture);
+        }
+    }
+
+    char TextureFileName[256];
+    ObjMakeSiblingFileName(TextureFileName, sizeof(TextureFileName), ObjFileName, MapName);
+
+    return(GameLoadTexture(Thread, Memory, GL, TextureFileName, GL_REPEAT));
 }
 
 // Reads an OBJ, de-duplicates it into a vertex/index pair, and hands both to
@@ -283,34 +333,22 @@ GameLoadModel(thread_context *Thread, game_memory *Memory, game_opengl_api *GL,
         Submesh->IndexCount = Model.Submeshes[I].IndexCount;
         Submesh->Material = Materials[Model.Submeshes[I].MaterialIndex];
         Submesh->DiffuseTexture = 0;
+        Submesh->AlphaTexture = 0;
 
         if(Submesh->Material.HasDiffuseMap)
         {
-            // NOTE(yigit): Two materials naming the same file must not upload
-            // it twice.  Submeshes already loaded are the cache - a linear scan
-            // over a few dozen of them, which is cheaper than any structure
-            // built to avoid it.
-            for(uint32 J = 0; J < (Result.SubmeshCount - 1); ++J)
-            {
-                render_submesh *Other = Result.Submeshes + J;
-                if(Other->DiffuseTexture &&
-                   ObjNamesMatch2(Other->Material.DiffuseMapName,
-                                  Submesh->Material.DiffuseMapName))
-                {
-                    Submesh->DiffuseTexture = Other->DiffuseTexture;
-                    break;
-                }
-            }
+            Submesh->DiffuseTexture =
+                GameLoadMaterialTexture(Thread, Memory, GL, FileName,
+                                        Submesh->Material.DiffuseMapName,
+                                        Result.Submeshes, Result.SubmeshCount - 1);
+        }
 
-            if(!Submesh->DiffuseTexture)
-            {
-                char TextureFileName[256];
-                ObjMakeSiblingFileName(TextureFileName, sizeof(TextureFileName),
-                                       FileName, Submesh->Material.DiffuseMapName);
-
-                Submesh->DiffuseTexture = GameLoadTexture(Thread, Memory, GL,
-                                                          TextureFileName, GL_REPEAT);
-            }
+        if(Submesh->Material.HasAlphaMap)
+        {
+            Submesh->AlphaTexture =
+                GameLoadMaterialTexture(Thread, Memory, GL, FileName,
+                                        Submesh->Material.AlphaMapName,
+                                        Result.Submeshes, Result.SubmeshCount - 1);
         }
     }
 
@@ -392,10 +430,16 @@ GameDrawModel(game_opengl_api *GL, uint32 Program, render_model *Model,
             ? Submesh->DiffuseTexture
             : WhiteTexture;
 
+        uint32 AlphaTexture = Submesh->AlphaTexture
+            ? Submesh->AlphaTexture
+            : WhiteTexture;
+
         GL->glActiveTexture(GL_TEXTURE0);
         GL->glBindTexture(GL_TEXTURE_2D, DiffuseTexture);
         GL->glActiveTexture(GL_TEXTURE1);
         GL->glBindTexture(GL_TEXTURE_2D, WhiteTexture);
+        GL->glActiveTexture(GL_TEXTURE2);
+        GL->glBindTexture(GL_TEXTURE_2D, AlphaTexture);
 
         // The last argument is a byte OFFSET into the bound element buffer,
         // not a pointer - a leftover from when this call could read indices
@@ -529,6 +573,7 @@ SetLitUniforms(game_opengl_api *GL, uint32 Program,
     // rest.
     SetUniformInt(GL, Program, "material.diffuse", 0);
     SetUniformInt(GL, Program, "material.specular", 1);
+    SetUniformInt(GL, Program, "material.alphaMask", 2);
 }
 
 // NOTE(yigit): View and projection have to be set here as well as on the lit

@@ -135,8 +135,10 @@ struct render_submesh
 
     // 0 when the material named no texture, in which case the draw falls back
     // to the 1x1 white texture and the colour comes from Material.Diffuse
-    // alone.
+    // alone.  The same fallback covers the alpha mask, where white means
+    // fully opaque.
     uint32 DiffuseTexture;
+    uint32 AlphaTexture;
 };
 
 // One mesh as the GPU holds it.  The CPU-side vertex and index arrays are gone

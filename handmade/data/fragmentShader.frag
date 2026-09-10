@@ -18,6 +18,13 @@ struct Material {
     vec3 diffuseColor;
     vec3 specularColor;
 
+    // Book ch. 22 - map_d, an opacity mask.  Sampled as .r, and multiplied by
+    // the diffuse texture's own alpha, because this scene supplies the cutout
+    // both ways: merged into the diffuse alpha for the foliage, as a separate
+    // greyscale file for the chains.  A material with neither binds white and
+    // opaque 1x1 textures, so both terms come out 1.
+    sampler2D alphaMask;
+
     float shininess;
 };
 
@@ -157,6 +164,22 @@ vec3 CalcSpotLight(SpotLight light, vec3 normal, vec3 fragPos, vec3 viewDir)
 
 void main()
 {
+    // Book ch. 22 - alpha testing.  Foliage and chains are flat cards with the
+    // leaf or link shape punched out of them; without this they render as solid
+    // rectangles.
+    //
+    // NOTE(yigit): discard, not blending.  The cutout is binary - a fragment is
+    // either leaf or gap - so there is nothing to blend, and blending would
+    // demand the geometry be sorted back-to-front every frame.  The cost is
+    // that discard defeats early-Z on most hardware, so this shader gets
+    // slower for every fragment, not just the cut ones.
+    float Opacity = texture(material.diffuse, TexCoords).a *
+                    texture(material.alphaMask, TexCoords).r;
+    if(Opacity < 0.5)
+    {
+        discard;
+    }
+
     vec3 norm = normalize(Normal);
 
     // The eye is the origin in view space, so "towards the viewer" is -FragPos.

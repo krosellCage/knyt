@@ -651,6 +651,17 @@ struct obj_material
 
     char DiffuseMapName[OBJ_MAX_MAP_NAME];
     bool32 HasDiffuseMap;
+
+    // Book ch. 22 - map_d, an opacity mask.  Sponza uses it for foliage and
+    // chains: the geometry is a flat card and the mask is what cuts the leaf
+    // shape out of it.
+    //
+    // NOTE(yigit): Not always present even when a material IS cut out.  This
+    // distribution of Sponza has the mask merged into the alpha channel of
+    // some diffuse textures and left as a separate file for others, so the
+    // shader has to honour both.
+    char AlphaMapName[OBJ_MAX_MAP_NAME];
+    bool32 HasAlphaMap;
 };
 
 // What a material looks like when the .mtl is missing or names nothing useful.
@@ -784,6 +795,19 @@ ObjParseMaterialLibrary(char *Contents, uint32 ContentsSize,
                 {
                     Material->Shininess = 1.0f;
                 }
+            }
+            else if(ObjLineStartsWith(At, "map_d"))
+            {
+                char *C = At + 5;
+                ObjSkipWhitespace(&C);
+
+                char *Name = C;
+                while(*C && !ObjIsEndOfLine(*C)) { ++C; }
+                while((C > Name) && ObjIsWhitespace(C[-1])) { --C; }
+
+                ObjCopyToken(Material->AlphaMapName, OBJ_MAX_MAP_NAME,
+                             Name, (uint32)(C - Name));
+                Material->HasAlphaMap = true;
             }
             else if(ObjLineStartsWith(At, "map_Kd"))
             {
