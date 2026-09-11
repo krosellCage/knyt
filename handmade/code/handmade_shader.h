@@ -160,7 +160,7 @@ GameBuildShaderProgram(thread_context *Thread, game_memory *Memory, game_opengl_
 }
 
 // NOTE(yigit): The hot-reload loop used to live here.  It moved to
-// handmade_render.h when the renderer became an object that owns its own
+// handmade_render_opengl.h when the renderer became an object that owns its own
 // programs - polling files and swapping program handles is backend work, and
 // this file is now only about compiling, linking and setting uniforms.
 

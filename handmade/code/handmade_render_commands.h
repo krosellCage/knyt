@@ -1,11 +1,14 @@
-#if !defined(HANDMADE_RENDERER_H)
+#if !defined(HANDMADE_RENDER_COMMANDS_H)
 /*
-  NOTE(yigit): What the game says it wants drawn, as DATA rather than as calls.
+  WHAT the game wants drawn.  The other half is handmade_render_opengl.h, which
+  decides HOW.
 
-  There is no OpenGL in this file and there must never be.  That is the whole
-  point: the game fills a buffer with commands, and something else - a GL
-  backend today, a Vulkan one later - walks it and decides how to execute them.
-  A direct call happens NOW, in THIS api, on THIS thread.  A pushed command
+  NOTE(yigit): This is the GAME side of the seam - it describes a frame as DATA
+  rather than as calls.  There must never be a graphics api in this file.
+
+  The game fills a buffer with commands, and something else - an OpenGL backend
+  today, a Vulkan one later - walks it and decides how to execute them.  A
+  direct call happens NOW, in THIS api, on THIS thread.  A pushed command
   happens later, in whatever, wherever.
 
   Five things fall out of that indirection:
@@ -281,5 +284,5 @@ PushOverlay(render_buffer *Buffer, overlay *Overlay, loaded_font *Font,
     }
 }
 
-#define HANDMADE_RENDERER_H
+#define HANDMADE_RENDER_COMMANDS_H
 #endif

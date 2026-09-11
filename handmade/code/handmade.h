@@ -197,7 +197,7 @@ struct render_model
 // a loaded_font, and a draw-model command names a render_model, so everything
 // it points at has to be declared before it.  No graphics api in that header
 // by design.
-#include "handmade_renderer.h"
+#include "handmade_render_commands.h"
 
 // NOTE(yigit): Declared, never defined here.  See the Renderer member below.
 struct renderer;

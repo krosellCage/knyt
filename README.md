@@ -80,16 +80,21 @@ live directly in the game's persistent memory block and survive a code reload.
 A RIFF/WAVE parser that walks the chunk list, widens mono to stereo, and streams
 into the platform's audio ring buffer with looping.
 
-**Renderer command buffer** — `handmade_renderer.h`, `handmade_render.h`
+**Renderer command buffer** — `handmade_render_commands.h`, `handmade_render_opengl.h`
 
-The game layer contains no OpenGL at all. It pushes tagged, variable-sized
-commands into a buffer and holds the renderer as an incomplete type it cannot
-see inside; a backend walks that buffer and executes it.
-`handmade_renderer.h` has no OpenGL by design, `handmade_render.h` is the
-OpenGL backend, and a second backend can sit beside it without the game layer
-changing a line. Groundwork for a Vulkan path.
+The game layer contains no OpenGL at all — not in code, not in comments. It
+pushes tagged, variable-sized commands into a buffer and holds the renderer as
+an incomplete type it cannot see inside; a backend walks that buffer and
+executes it. Meshes and textures live behind opaque handles into tables the
+backend owns.
 
-**Lighting** — `handmade_render.h`
+The two filenames say which side of the seam they are on: `_commands` describes
+WHAT to draw and has no graphics api in it, `_opengl` decides HOW. A
+`handmade_render_vulkan.h` would sit beside the second one, implement the same
+`RenderBufferExecute` against the same command stream, and change nothing in
+the game layer.
+
+**Lighting** — `handmade_render_opengl.h`
 
 Phong — ambient, diffuse and specular — computed in view space, with each light
 type as its own GLSL struct and its own function. Six lights are summed per

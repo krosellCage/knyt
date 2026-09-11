@@ -1,14 +1,18 @@
-#if !defined(HANDMADE_RENDER_H)
+#if !defined(HANDMADE_RENDER_OPENGL_H)
 /*
-  NOTE(yigit): The OpenGL BACKEND.  It reads the command buffer that
-  handmade_renderer.h defines and turns each command into GL calls.
+  HOW to draw it, in OpenGL.  The other half is handmade_render_commands.h,
+  which describes WHAT.
 
-  This is the only file on the game side that still knows OpenGL exists.  When
-  a Vulkan backend arrives it will be a second file beside this one,
-  implementing the same one function against the same command stream - and
-  nothing in handmade.cpp will change.
+  NOTE(yigit): This is the BACKEND side of the seam.  It reads the command
+  buffer that handmade_render_commands.h defines and turns each command into GL
+  calls, and it is the only place in the game DLL that knows OpenGL exists.
 
-  Everything here is per frame.  Loading assets is handmade_assets.h.
+  The _opengl on the end is the point of the name: a Vulkan backend would be
+  handmade_render_vulkan.h, sitting right beside this one, implementing the
+  same RenderBufferExecute against the same command stream.  Nothing in
+  handmade.cpp would change.
+
+  Everything here runs per frame.  Loading assets is handmade_assets.h.
 */
 
 /*
@@ -613,5 +617,5 @@ RenderBufferExecute(renderer *Renderer, render_buffer *Buffer)
     GL->glBindVertexArray(0);
 }
 
-#define HANDMADE_RENDER_H
+#define HANDMADE_RENDER_OPENGL_H
 #endif

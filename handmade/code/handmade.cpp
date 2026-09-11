@@ -4,7 +4,7 @@
   arrives through game_memory.
 
   Asset loading lives in handmade_assets.h and per-frame drawing in
-  handmade_render.h; what is left here is the two entry points the platform
+  handmade_render_opengl.h; what is left here is the two entry points the platform
   calls and the one-time setup they need.
 */
 
@@ -13,14 +13,14 @@
 #include "handmade_shader.h"
 
 // NOTE(yigit): Only for snprintf, which builds the "pointLights[2].quadratic"
-// style uniform names in handmade_render.h.  The book concatenates those with
+// style uniform names in handmade_render_opengl.h.  The book concatenates those with
 // std::string; there is none here.  Must come before the two headers below,
 // which both use it.
 #include <stdio.h>
 
 // NOTE(yigit): render BEFORE assets now - the loaders take a renderer and use
 // its GL pointer, so the struct has to be declared first.
-#include "handmade_render.h"
+#include "handmade_render_opengl.h"
 #include "handmade_assets.h"
 
 // NOTE(yigit): Scene data, and it lives in the game layer now rather than in
