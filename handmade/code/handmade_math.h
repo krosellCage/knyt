@@ -56,6 +56,50 @@ Mat4Perspective(real32 FovYRadians, real32 Aspect, real32 Near, real32 Far)
     return(M);
 }
 
+/*
+  Orthographic projection - no perspective divide, so distance does not shrink
+  anything.  What 2D overlays are drawn with: HUD, debug text, anything meant
+  to sit flat on the screen.
+
+  NOTE(yigit): The difference from Mat4Perspective is the row that is NOT set
+  here.  Perspective puts -1 in E[11], which lands the eye-space Z in the
+  clip-space W, and the divide by W is what makes distant things smaller.
+  Ortho leaves E[11] at 0 and E[15] at 1, so W is always 1 and no divide
+  happens at all.
+
+  This is a plain remap: the box (Left..Right, Bottom..Top, Near..Far) becomes
+  the -1..1 cube OpenGL clips against.  The E[12..14] terms are the shift that
+  centres the box, the E[0], E[5], E[10] terms are the scale that sizes it.
+
+  For screen-space text call it as
+
+      Mat4Ortho(0, Width, 0, Height, -1, 1)
+
+  which puts (0,0) at the BOTTOM left, matching OpenGL's texture and viewport
+  convention rather than the top-left one most windowing systems use.  Swapping
+  Bottom and Top flips it if you would rather count from the top.
+*/
+inline mat4
+Mat4Ortho(real32 Left, real32 Right, real32 Bottom, real32 Top,
+          real32 Near, real32 Far)
+{
+    mat4 M = {};
+
+    M.E[0]  =  2.0f / (Right - Left);
+    M.E[5]  =  2.0f / (Top - Bottom);
+
+    // Negated because OpenGL's clip space looks down -Z while Near and Far are
+    // given as positive distances in front of the camera.
+    M.E[10] = -2.0f / (Far - Near);
+
+    M.E[12] = -(Right + Left) / (Right - Left);
+    M.E[13] = -(Top + Bottom) / (Top - Bottom);
+    M.E[14] = -(Far + Near) / (Far - Near);
+    M.E[15] =  1.0f;
+
+    return(M);
+}
+
 // Translation matrix
 inline mat4
 Mat4Translation(real32 X, real32 Y, real32 Z)
