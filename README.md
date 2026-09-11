@@ -26,7 +26,9 @@ cd build && ./x_knyt
 ```
 
 The build produces two artifacts: `debug/libknyt.so`, which is the game, and
-`x_knyt`, which is the platform layer that loads it.
+`x_knyt`, which is the platform layer that loads it. It also links `build/data`
+to `handmade/data` rather than copying, so assets exist exactly once on disk and
+an edit to a shader is live without rebuilding.
 
 ## Controls
 

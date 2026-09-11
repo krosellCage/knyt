@@ -6,12 +6,19 @@
 cd "$(dirname "$0")"
 
 mkdir -p ../../build/debug
-mkdir -p ../../build/data
 
-# Assets (shaders, textures) live in handmade/data and are copied to the build
-# directory, which the game reads at runtime.  handmade/data is the source of
-# truth - never edit the copy under build/data, it gets overwritten.
-cp -u ../data/* ../../build/data/
+# Assets are NOT copied.  build/data is a symlink to handmade/data, so there is
+# exactly one copy of every asset on disk and an edit is live immediately -
+# there is no "source of truth" left to get wrong, because there is only one
+# file.  The Windows build makes the same path a directory junction.
+#
+# NOTE(yigit): The target is relative to the LINK, not to this script, which is
+# why it is ../handmade/data and not ../data.
+#
+# rm -rf ../../build removes the symlink itself, not what it points at.
+if [ ! -e ../../build/data ]; then
+    ln -s ../handmade/data ../../build/data
+fi
 
 pushd ../../build > /dev/null
 
