@@ -32,6 +32,7 @@ enum render_program
 {
     RenderProgram_Lit,
     RenderProgram_Lamp,
+    RenderProgram_Overlay,
 
     RenderProgram_Count,
 };
@@ -41,6 +42,7 @@ enum render_command_type
     RenderCommand_Clear,
     RenderCommand_Setup,
     RenderCommand_DrawModel,
+    RenderCommand_DrawOverlay,
 };
 
 // NOTE(yigit): Size is what lets commands be different sizes.  A Clear is
@@ -119,6 +121,27 @@ struct render_command_draw_model
 
     mat4 Transform;
     render_program Program;
+};
+
+/*
+  The 2D pass: whatever quads the overlay accumulated this frame, drawn with
+  blending on and depth off.
+
+  NOTE(yigit): One command for the whole overlay rather than one per quad.  The
+  quads already live in a contiguous array that goes to the GPU in a single
+  upload, so per-quad commands would be a second copy of a list that exists.
+  Where a push buffer earns per-item commands is when items need SORTING, and
+  an overlay is deliberately drawn in the order it was written.
+*/
+struct render_command_draw_overlay
+{
+    render_command_header Header;
+
+    overlay *Overlay;
+    loaded_font *Font;
+
+    mat4 Projection;
+    vec3 Color;
 };
 
 struct render_buffer
@@ -213,6 +236,27 @@ PushModel(render_buffer *Buffer, render_model *Model, mat4 Transform,
         Command->Model = Model;
         Command->Transform = Transform;
         Command->Program = Program;
+    }
+}
+
+internal void
+PushOverlay(render_buffer *Buffer, overlay *Overlay, loaded_font *Font,
+            mat4 Projection, vec3 Color)
+{
+    if(!Overlay || !Overlay->VertexCount)
+    {
+        return;
+    }
+
+    render_command_draw_overlay *Command =
+        PushRenderCommand(Buffer, render_command_draw_overlay, RenderCommand_DrawOverlay);
+
+    if(Command)
+    {
+        Command->Overlay = Overlay;
+        Command->Font = Font;
+        Command->Projection = Projection;
+        Command->Color = Color;
     }
 }
 

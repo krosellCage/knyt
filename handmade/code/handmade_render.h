@@ -270,6 +270,21 @@ RenderBufferExecute(opengl_backend *Backend, render_buffer *Buffer)
                 GameDrawModel(GL, Program, Command->Model, Command->Transform,
                               Backend->WhiteTexture);
             } break;
+
+            case RenderCommand_DrawOverlay:
+            {
+                render_command_draw_overlay *Command = (render_command_draw_overlay *)Header;
+
+                // NOTE(yigit): OverlayFlush owns the blend and depth state it
+                // needs, and restores it afterwards.  That bookkeeping used to
+                // sit in the game layer; it belongs on this side of the seam,
+                // because which state a 2D pass requires is an api question.
+                OverlayFlush(Command->Overlay, GL,
+                             Backend->Programs[RenderProgram_Overlay],
+                             Command->Projection,
+                             Command->Font ? Command->Font->Texture : Backend->WhiteTexture,
+                             Command->Color);
+            } break;
         }
 
         At += Header->Size;

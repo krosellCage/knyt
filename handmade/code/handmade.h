@@ -159,15 +159,17 @@ struct render_model
 // holds a camera by value.  It needs Pi32 and the internal macro, both defined
 // above.
 #include "handmade_camera.h"
-// NOTE(yigit): game_state holds a render_buffer, and the renderer needs
-// render_model which is declared above.  No OpenGL in that header by design.
-#include "handmade_renderer.h"
 // NOTE(yigit): After the Push macros above - LoadWAV allocates with PushArray.
 #include "handmade_sound.h"
 // NOTE(yigit): game_state holds an overlay by value.  This header deliberately
 // calls OpenGL directly rather than using handmade_shader.h's uniform setters -
 // that file includes this one, so reaching for them would close the circle.
 #include "handmade_overlay.h"
+// NOTE(yigit): LAST of the four.  A draw-overlay command names an overlay and
+// a loaded_font, and a draw-model command names a render_model, so everything
+// it points at has to be declared before it.  No OpenGL in that header by
+// design.
+#include "handmade_renderer.h"
 
 struct game_state
 {

@@ -277,25 +277,11 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
                   RenderProgram_Lamp);
     }
 
-    // ------------------------------------------------------------------
-    // Execute
-    //
-    // NOTE(yigit): The program handles are gathered here every frame rather
-    // than kept in the backend, because shader hot reload relinks them and a
-    // stored handle would be stale the moment a .frag is saved.
-    // ------------------------------------------------------------------
-    opengl_backend Backend = {};
-    Backend.GL = GL;
-    Backend.Programs[RenderProgram_Lit]  = State->ShaderProgram[0];
-    Backend.Programs[RenderProgram_Lamp] = State->ShaderProgram[1];
-    Backend.WhiteTexture = State->WhiteTexture;
-
-    RenderBufferExecute(&Backend, &State->RenderBuffer);
-
-    uint32 OverlayProgram = State->ShaderProgram[2];
-
     // ---------------------------------------------------------------------
-    // The 2D overlay - drawn last, so it sits on top of everything
+    // The 2D overlay - pushed last, so it sits on top of everything
+    //
+    // NOTE(yigit): Building the text is content, not rendering - it stays in
+    // the game layer.  Only the flush crossed the seam.
     // ---------------------------------------------------------------------
     OverlayReset(&State->Overlay);
 
@@ -323,14 +309,33 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
         OverlayPushText(&State->Overlay, &State->DebugFont, 12.0f, LineY, Line);
         LineY += State->DebugFont.LineHeight;
 
-        snprintf(Line, sizeof(Line), "%u tris  %u submeshes",
-                 State->Model.IndexCount / 3, State->Model.SubmeshCount);
+        snprintf(Line, sizeof(Line), "%u tris  %u submeshes  %u cmd bytes",
+                 State->Model.IndexCount / 3, State->Model.SubmeshCount,
+                 (uint32)State->RenderBuffer.Used);
         OverlayPushText(&State->Overlay, &State->DebugFont, 12.0f, LineY, Line);
     }
 
-    OverlayFlush(&State->Overlay, GL, OverlayProgram, OverlayProjection,
-                 State->DebugFont.Texture, Vec3(0.95f, 0.93f, 0.85f));
+    PushOverlay(&State->RenderBuffer, &State->Overlay, &State->DebugFont,
+                OverlayProjection, Vec3(0.95f, 0.93f, 0.85f));
 
+    // ------------------------------------------------------------------
+    // Execute
+    //
+    // ONE walk of the buffer for the whole frame, at the very end.  Everything
+    // above only described what it wanted.
+    //
+    // NOTE(yigit): The program handles are gathered here every frame rather
+    // than kept in the backend, because shader hot reload relinks them and a
+    // stored handle would be stale the moment a .frag is saved.
+    // ------------------------------------------------------------------
+    opengl_backend Backend = {};
+    Backend.GL = GL;
+    Backend.Programs[RenderProgram_Lit]     = State->ShaderProgram[0];
+    Backend.Programs[RenderProgram_Lamp]    = State->ShaderProgram[1];
+    Backend.Programs[RenderProgram_Overlay] = State->ShaderProgram[2];
+    Backend.WhiteTexture = State->WhiteTexture;
+
+    RenderBufferExecute(&Backend, &State->RenderBuffer);
 }
 
 extern "C" GAME_GET_SOUND_SAMPLES(GameGetSoundSamples)
