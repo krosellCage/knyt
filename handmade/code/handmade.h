@@ -120,6 +120,29 @@ ResetArena(memory_arena *Arena)
 // Assert, vec2/vec3 - is already in scope by this point.
 #include "handmade_obj.h"
 
+/*
+  Opaque handles to things the backend owns.
+
+  NOTE(yigit): The value is an index into a table inside the renderer, PLUS
+  ONE - so a zeroed handle means "nothing".  PermanentStorage starts zeroed, so
+  that falls out for free rather than needing an explicit invalid constant.
+
+  They are structs rather than bare uint32s on purpose.  You cannot do
+  arithmetic on one by accident, you cannot pass a texture where a mesh is
+  wanted, and you cannot hand one to a graphics api by mistake - the compiler
+  stops all three.
+
+  This replaces render_model naming the backend's own buffer objects directly.
+  Those are not the same things, or even the same NUMBER of things, from one
+  api to the next - so spelling them out in a header the game layer reads meant
+  the game layer was quietly shaped by whichever one happened to be underneath.
+*/
+struct mesh_handle    { uint32 Value; };
+struct texture_handle { uint32 Value; };
+
+inline bool32 IsValidHandle(mesh_handle Handle)    { return(Handle.Value != 0); }
+inline bool32 IsValidHandle(texture_handle Handle) { return(Handle.Value != 0); }
+
 // A run of the index buffer sharing one material - a copy of obj_submesh that
 // survives the load, since the OBJ side of it lives in scratch memory.
 #define MAX_SUBMESHES_PER_MODEL 64
@@ -133,22 +156,26 @@ struct render_submesh
     // so a separate material table would only ever be read one-to-one.
     obj_material Material;
 
-    // 0 when the material named no texture, in which case the draw falls back
-    // to the 1x1 white texture and the colour comes from Material.Diffuse
-    // alone.  The same fallback covers the alpha mask, where white means
-    // fully opaque.
-    uint32 DiffuseTexture;
-    uint32 AlphaTexture;
+    // Zeroed when the material named no texture, in which case the draw falls
+    // back to the 1x1 white texture and the colour comes from Material.Diffuse
+    // alone.  The same fallback covers the alpha mask, where white means fully
+    // opaque.
+    texture_handle DiffuseTexture;
+    texture_handle AlphaTexture;
 };
 
 // One mesh as the GPU holds it.  The CPU-side vertex and index arrays are gone
-// by the time this exists - glBufferData copies them, so nothing has to be
-// kept around.
+// by the time this exists - the upload copies them, so nothing has to be kept
+// around.
 struct render_model
 {
-    uint32 VAO;
-    uint32 VBO;
-    uint32 EBO;
+    // One opaque handle.  What the backend keeps behind it is its own
+    // business, and it is not the same set of things on every api.
+    mesh_handle Mesh;
+
+    // NOT behind the handle.  The game layer reads this for the debug overlay,
+    // and a triangle count is a fact about the model rather than about whatever
+    // is holding it.
     uint32 IndexCount;
 
     render_submesh Submeshes[MAX_SUBMESHES_PER_MODEL];
@@ -161,14 +188,15 @@ struct render_model
 #include "handmade_camera.h"
 // NOTE(yigit): After the Push macros above - LoadWAV allocates with PushArray.
 #include "handmade_sound.h"
-// NOTE(yigit): game_state holds an overlay by value.  This header deliberately
-// calls OpenGL directly rather than using handmade_shader.h's uniform setters -
-// that file includes this one, so reaching for them would close the circle.
+// NOTE(yigit): game_state holds an overlay by value.  That header is backend
+// code, and it reaches its api directly rather than through
+// handmade_shader.h's uniform setters - that file includes this one, so using
+// them would close the circle.
 #include "handmade_overlay.h"
 // NOTE(yigit): LAST of the four.  A draw-overlay command names an overlay and
 // a loaded_font, and a draw-model command names a render_model, so everything
-// it points at has to be declared before it.  No OpenGL in that header by
-// design.
+// it points at has to be declared before it.  No graphics api in that header
+// by design.
 #include "handmade_renderer.h"
 
 // NOTE(yigit): Declared, never defined here.  See the Renderer member below.
@@ -190,16 +218,16 @@ struct game_state
 
     // NOTE(yigit): An INCOMPLETE type, and only ever a pointer.  The game knows
     // a renderer exists and can hand it around; it does not know what is in
-    // one.  That is what keeps game_opengl_api out of this header, and what
-    // lets a Vulkan backend define the same name with entirely different
-    // contents without the game layer changing a line.
+    // one.  That is what keeps the backend's function table out of this header,
+    // and what lets a different backend define the same name with entirely
+    // different contents without the game layer changing a line.
     //
     // Shader programs and their file watches used to sit here.  A program
     // handle is a backend resource, so both moved inside.
     renderer *Renderer;
 
     // NOTE(yigit): All geometry AND all textures are loaded from disk now.  The
-    // hand-written cube vertex table that used to live in GameInitOpenGL is
+    // hand-written cube vertex table that used to live in GameInitScene is
     // gone, so are the ten hardcoded container positions, and so is the fixed
     // container texture pair - a material names its own texture and the loader
     // fetches it.

@@ -24,6 +24,18 @@
   of handmade_shader.h.  A program handle is a backend resource; game_state has
   no business holding one.
 */
+// What one mesh is, in OpenGL terms.  Nothing outside this file knows these
+// three numbers exist - a mesh_handle is an index into the table below.
+struct opengl_mesh
+{
+    uint32 VAO;
+    uint32 VBO;
+    uint32 EBO;
+};
+
+#define RENDERER_MAX_MESHES   64
+#define RENDERER_MAX_TEXTURES 256
+
 struct renderer
 {
     game_opengl_api *GL;
@@ -34,28 +46,207 @@ struct renderer
     uint32 Programs[RenderProgram_Count];
     shader_watch Watches[RenderProgram_Count];
 
+    /*
+      NOTE(yigit): The resource tables.  A mesh_handle or texture_handle is an
+      index into one of these plus one, so zero means "nothing".
+
+      Fixed-size and append-only.  There is no destroy, because nothing in this
+      engine has ever wanted one - assets load once and live until the program
+      exits.  Adding destruction means a free list and generation counters to
+      catch a handle held past the death of what it named, and that is work
+      with no caller.
+    */
+    opengl_mesh Meshes[RENDERER_MAX_MESHES];
+    uint32 MeshCount;
+
+    uint32 Textures[RENDERER_MAX_TEXTURES];
+    uint32 TextureCount;
+
     // One white pixel, for materials that name no texture.
-    uint32 WhiteTexture;
+    texture_handle WhiteTexture;
 };
 
-// Makes the fallback texture: a single white pixel.
-internal uint32
-RendererCreateWhiteTexture(game_opengl_api *GL)
+// Turning a handle back into the thing it names.  Both return a zeroed result
+// for an invalid handle rather than asserting, so a model that failed to load
+// draws nothing instead of taking the frame down.
+internal opengl_mesh *
+RendererGetMesh(renderer *Renderer, mesh_handle Handle)
 {
-    uint32 Result = 0;
-    uint8 White[4] = {255, 255, 255, 255};
+    opengl_mesh *Result = 0;
 
-    GL->glGenTextures(1, &Result);
-    GL->glBindTexture(GL_TEXTURE_2D, Result);
-    GL->glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    GL->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, White);
+    if(Handle.Value && (Handle.Value <= Renderer->MeshCount))
+    {
+        Result = Renderer->Meshes + (Handle.Value - 1);
+    }
 
     return(Result);
 }
+
+internal uint32
+RendererGetTexture(renderer *Renderer, texture_handle Handle)
+{
+    uint32 Result = 0;
+
+    if(Handle.Value && (Handle.Value <= Renderer->TextureCount))
+    {
+        Result = Renderer->Textures[Handle.Value - 1];
+    }
+
+    return(Result);
+}
+
+/*
+  Hands a block of CPU pixels to the GPU and returns a handle to it.
+
+  NOTE(yigit): This is the ONLY place a texture reaches OpenGL.  Three callers
+  used to repeat these eight calls between them - the image loader, the font
+  baker, and the white-pixel fallback - each with its own slightly different
+  set of parameters.  Pulling them together is the third-use rule firing, and
+  it is also what lets those three become api-agnostic: they now describe what
+  they want and this decides how to express it.
+
+  ChannelCount is the real one, not an assumption.  Sponza ships greyscale
+  alpha masks at one byte per pixel; treating anything non-RGBA as three bytes
+  reads three times the data that exists and walks off the end of the buffer.
+*/
+internal texture_handle
+RendererUploadTexture(renderer *Renderer, uint8 *Pixels,
+                      uint32 Width, uint32 Height, uint32 ChannelCount,
+                      texture_wrap Wrap, texture_filter Filter)
+{
+    game_opengl_api *GL = Renderer->GL;
+    texture_handle Result = {};
+
+    if(Renderer->TextureCount >= RENDERER_MAX_TEXTURES)
+    {
+        return(Result);
+    }
+
+    uint32 Texture = 0;
+
+    uint32 Format = GL_RGB;
+    switch(ChannelCount)
+    {
+        case 1: { Format = GL_RED; } break;
+        case 2: { Format = GL_RG; } break;
+        case 3: { Format = GL_RGB; } break;
+        case 4: { Format = GL_RGBA; } break;
+    }
+
+    uint32 GLWrap = (Wrap == TextureWrap_ClampToEdge) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
+
+    bool32 WantMipmaps = (Filter == TextureFilter_LinearMipmap);
+    uint32 MinFilter = WantMipmaps ? GL_LINEAR_MIPMAP_LINEAR : GL_LINEAR;
+
+    GL->glGenTextures(1, &Texture);
+    GL->glBindTexture(GL_TEXTURE_2D, Texture);
+
+    // NOTE(yigit): Alignment 1 is required, not optional.  OpenGL assumes each
+    // ROW of pixel data starts on a 4-byte boundary by default.  A greyscale
+    // row is rarely a multiple of four bytes, so the default would make it skip
+    // padding that is not there and shear the whole image diagonally.
+    GL->glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GLWrap);
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GLWrap);
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, MinFilter);
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    GL->glTexImage2D(GL_TEXTURE_2D, 0, (int32)Format, (int32)Width, (int32)Height, 0,
+                     Format, GL_UNSIGNED_BYTE, Pixels);
+
+    if(WantMipmaps)
+    {
+        GL->glGenerateMipmap(GL_TEXTURE_2D);
+    }
+
+    // Plus one, so a zeroed handle reads as "nothing".
+    Renderer->Textures[Renderer->TextureCount++] = Texture;
+    Result.Value = Renderer->TextureCount;
+
+    return(Result);
+}
+
+/*
+  Hands a mesh to the GPU.  The caller supplies plain arrays and learns nothing
+  about how they get there.
+
+  NOTE(yigit): The attribute layout is fixed HERE rather than passed in, because
+  obj_vertex IS the layout - position, normal, texcoord, 8 floats, 32 bytes.
+  Describing it at the call site would let the two drift apart silently.
+
+  A VAO is an OpenGL idea with no Vulkan equivalent; there, the same
+  information is vertex input state baked into a pipeline object.  That is
+  exactly why it is hidden behind this function: the caller asks for a mesh on
+  the GPU and never learns which of those two it got.
+*/
+internal mesh_handle
+RendererUploadMesh(renderer *Renderer,
+                   obj_vertex *Vertices, uint32 VertexCount,
+                   uint32 *Indices, uint32 IndexCount)
+{
+    game_opengl_api *GL = Renderer->GL;
+    mesh_handle Result = {};
+
+    if(Renderer->MeshCount >= RENDERER_MAX_MESHES)
+    {
+        return(Result);
+    }
+
+    opengl_mesh *Mesh = Renderer->Meshes + Renderer->MeshCount;
+
+    GL->glGenVertexArrays(1, &Mesh->VAO);
+    GL->glGenBuffers(1, &Mesh->VBO);
+    GL->glGenBuffers(1, &Mesh->EBO);
+
+    GL->glBindVertexArray(Mesh->VAO);
+
+    GL->glBindBuffer(GL_ARRAY_BUFFER, Mesh->VBO);
+    GL->glBufferData(GL_ARRAY_BUFFER, VertexCount * sizeof(obj_vertex),
+                     Vertices, GL_STATIC_DRAW);
+
+    // NOTE(yigit): Unlike GL_ARRAY_BUFFER, the ELEMENT buffer binding is stored
+    // IN THE VAO.  So it has to be bound while the VAO is bound, and it must
+    // not be unbound before the VAO is - unbind it first and the VAO forgets
+    // its index buffer and the model draws nothing.
+    GL->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, Mesh->EBO);
+    GL->glBufferData(GL_ELEMENT_ARRAY_BUFFER, IndexCount * sizeof(uint32),
+                     Indices, GL_STATIC_DRAW);
+
+    // obj_vertex was laid out to match an 8-float stride exactly, so these are
+    // the three usual calls with sizeof doing the arithmetic.
+    GL->glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(obj_vertex),
+                              (void *)0);
+    GL->glEnableVertexAttribArray(0);
+
+    GL->glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(obj_vertex),
+                              (void *)(3 * sizeof(real32)));
+    GL->glEnableVertexAttribArray(1);
+
+    GL->glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(obj_vertex),
+                              (void *)(6 * sizeof(real32)));
+    GL->glEnableVertexAttribArray(2);
+
+    GL->glBindVertexArray(0);
+
+    // Plus one, so a zeroed handle reads as "nothing".
+    ++Renderer->MeshCount;
+    Result.Value = Renderer->MeshCount;
+
+    return(Result);
+}
+
+// One white pixel, for materials that name no texture.  White times a colour
+// is that colour, so the shader never has to ask whether a texture exists.
+internal texture_handle
+RendererCreateWhiteTexture(renderer *Renderer)
+{
+    uint8 White[4] = {255, 255, 255, 255};
+
+    return(RendererUploadTexture(Renderer, White, 1, 1, 4,
+                                 TextureWrap_Repeat, TextureFilter_Linear));
+}
+
 
 /*
   Allocates and sets up the backend.  Called once.
@@ -78,7 +269,7 @@ RendererInitialize(game_memory *Memory, memory_arena *Arena)
     // glEnable in the game layer.
     Result->GL->glEnable(GL_DEPTH_TEST);
 
-    Result->WhiteTexture = RendererCreateWhiteTexture(Result->GL);
+    Result->WhiteTexture = RendererCreateWhiteTexture(Result);
 
     return(Result);
 }
@@ -155,19 +346,27 @@ RendererUpdateShaders(renderer *Renderer, thread_context *Thread, game_memory *M
 // material change is a uniform change, and uniforms cannot vary within a draw -
 // which is the whole reason the index buffer was reordered by material.
 internal void
-GameDrawModel(game_opengl_api *GL, uint32 Program, render_model *Model,
-              mat4 ModelMatrix, uint32 WhiteTexture)
+GameDrawModel(renderer *Renderer, uint32 Program, render_model *Model,
+              mat4 ModelMatrix)
 {
-    if(!Model->IndexCount)
+    game_opengl_api *GL = Renderer->GL;
+
+    // NOTE(yigit): The handle is resolved HERE, at the last possible moment.
+    // Everything upstream - the loaders, the command buffer, game_state - only
+    // ever moved an opaque number around.
+    opengl_mesh *Mesh = RendererGetMesh(Renderer, Model->Mesh);
+    if(!Mesh || !Model->IndexCount)
     {
         return;
     }
+
+    uint32 WhiteTexture = RendererGetTexture(Renderer, Renderer->WhiteTexture);
 
     // The At-setters below write to whatever program is bound, so this has to
     // happen before any of them - and it replaces the glUseProgram the
     // name-based setters used to do on every single write.
     GL->glUseProgram(Program);
-    GL->glBindVertexArray(Model->VAO);
+    GL->glBindVertexArray(Mesh->VAO);
 
     // NOTE(yigit): Hoisted out of the loop.  A uniform's location is fixed for
     // the life of a linked program, and these four do not change between the
@@ -197,13 +396,11 @@ GameDrawModel(game_opengl_api *GL, uint32 Program, render_model *Model,
 
         // White when the material named no texture, so the multiply in the
         // shader leaves Kd untouched.
-        uint32 DiffuseTexture = Submesh->DiffuseTexture
-            ? Submesh->DiffuseTexture
-            : WhiteTexture;
+        uint32 DiffuseTexture = RendererGetTexture(Renderer, Submesh->DiffuseTexture);
+        if(!DiffuseTexture) { DiffuseTexture = WhiteTexture; }
 
-        uint32 AlphaTexture = Submesh->AlphaTexture
-            ? Submesh->AlphaTexture
-            : WhiteTexture;
+        uint32 AlphaTexture = RendererGetTexture(Renderer, Submesh->AlphaTexture);
+        if(!AlphaTexture) { AlphaTexture = WhiteTexture; }
 
         GL->glActiveTexture(GL_TEXTURE0);
         GL->glBindTexture(GL_TEXTURE_2D, DiffuseTexture);
@@ -389,8 +586,7 @@ RenderBufferExecute(renderer *Renderer, render_buffer *Buffer)
                 render_command_draw_model *Command = (render_command_draw_model *)Header;
 
                 uint32 Program = Renderer->Programs[Command->Program];
-                GameDrawModel(GL, Program, Command->Model, Command->Transform,
-                              Renderer->WhiteTexture);
+                GameDrawModel(Renderer, Program, Command->Model, Command->Transform);
             } break;
 
             case RenderCommand_DrawOverlay:
@@ -404,7 +600,9 @@ RenderBufferExecute(renderer *Renderer, render_buffer *Buffer)
                 OverlayFlush(Command->Overlay, GL,
                              Renderer->Programs[RenderProgram_Overlay],
                              Command->Projection,
-                             Command->Font ? Command->Font->Texture : Renderer->WhiteTexture,
+                             RendererGetTexture(Renderer,
+                                                Command->Font ? Command->Font->Texture
+                                                              : Renderer->WhiteTexture),
                              Command->Color);
             } break;
         }

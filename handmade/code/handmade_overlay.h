@@ -55,7 +55,7 @@ struct font_glyph
 
 struct loaded_font
 {
-    uint32 Texture;             // single channel: coverage, not colour
+    texture_handle Texture;     // single channel: coverage, not colour
     font_glyph Glyphs[FONT_CHAR_COUNT];
     real32 LineHeight;
 };

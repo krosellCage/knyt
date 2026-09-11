@@ -279,7 +279,7 @@ ObjCountElements(char *Contents, uint32 ContentsSize)
 // NOTE(yigit): These are NOT what the GPU is handed.  OBJ indexes positions,
 // texcoords and normals separately, so a face corner like 5/12/3 picks one
 // entry from each of these three lists.  Turning that into the single index
-// per vertex OpenGL needs comes later.
+// per vertex a GPU index buffer needs comes later.
 // ---------------------------------------------------------------------------
 
 // One corner of one triangle, exactly as the file states it: three indices
@@ -606,7 +606,7 @@ ObjParseSourceData(memory_arena *Arena, char *Contents, uint32 ContentsSize)
 // ---------------------------------------------------------------------------
 // De-duplication - the actual job
 //
-// OBJ says "position 5, texcoord 12, normal 3".  OpenGL says "vertex 17", and
+// OBJ says "position 5, texcoord 12, normal 3".  A GPU says "vertex 17", and
 // that one index selects from one buffer.  So every distinct v/vt/vn TRIPLE
 // has to become one vertex, and repeated triples have to collapse onto the
 // same index or the buffer is three times bigger than it needs to be.
@@ -615,9 +615,9 @@ ObjParseSourceData(memory_arena *Arena, char *Contents, uint32 ContentsSize)
 // you think about it.
 // ---------------------------------------------------------------------------
 
-// 32 bytes, which is exactly the 8-float stride the cube's VAO already uses:
-// 3 position, 3 normal, 2 texcoord.  Matching it means a loaded model can be
-// drawn by the existing shader with no attribute changes.
+// 32 bytes: 3 position, 3 normal, 2 texcoord, an 8-float stride.  The backend
+// knows this layout and describes it to the GPU when a mesh is uploaded, so
+// nothing here has to say how it gets there.
 struct obj_vertex
 {
     vec3 Position;

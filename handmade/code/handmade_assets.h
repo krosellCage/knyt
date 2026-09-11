@@ -4,7 +4,7 @@
   holds - textures, fonts and models.  Split out of handmade.cpp when that file
   passed 900 lines and asset loading was half of it.
 
-  Nothing here is called per frame.  All of it runs once, from GameInitOpenGL.
+  Nothing here is called per frame.  All of it runs once, from GameInitScene.
 
   The two stb implementations live here rather than in handmade.cpp because
   this is the only code that uses them, and it keeps their 13000 lines out of
@@ -24,12 +24,20 @@
 #include "stb_truetype.h"
 #pragma warning(pop)
 
-internal uint32
+/*
+  Reads an image file and hands it to the GPU.
+
+  NOTE(yigit): No OpenGL in here.  Decoding an image is CPU work that any
+  backend would do identically; only the upload is api-specific, and that is
+  one call at the bottom.  The same split the OBJ loader already had, where
+  ObjLoadModel produces plain vertex and index arrays and knows nothing about
+  how they reach the GPU.
+*/
+internal texture_handle
 GameLoadTexture(thread_context *Thread, game_memory *Memory, renderer *Renderer,
-                const char *FileName, uint32 WrapMode)
+                const char *FileName, texture_wrap Wrap)
 {
-    game_opengl_api *GL = Renderer->GL;
-    uint32 Result = 0;
+    texture_handle Result = {};
 
     debug_read_file_result File = Memory->DEBUGPlatformReadEntireFile(Thread, FileName);
     if(!File.Contents)
@@ -40,7 +48,13 @@ GameLoadTexture(thread_context *Thread, game_memory *Memory, renderer *Renderer,
         return(Result);
     }
 
-    stbi_set_flip_vertically_on_load(1); // OpenGL's (0,0) is bottom-left
+    // NOTE(yigit): The one convention that is arguably still leaking.  OpenGL
+    // puts a texture's (0,0) at the BOTTOM left and most image formats store
+    // rows top-down, so the rows are reversed here.  Vulkan's origin is the
+    // top left and would not want this.  It stays for now because the flip is
+    // a property of the decoded data rather than of the upload, and there is
+    // nothing to compare against until a second backend exists.
+    stbi_set_flip_vertically_on_load(1);
 
     int32 Width, Height, ChannelCount;
     uint8 *Pixels = stbi_load_from_memory((const uint8 *)File.Contents, (int32)File.ContentsSize,
@@ -49,36 +63,12 @@ GameLoadTexture(thread_context *Thread, game_memory *Memory, renderer *Renderer,
 
     if(Pixels)
     {
-        // NOTE(yigit): One and two channel images are real - Sponza ships its
-        // alpha masks as greyscale PNGs.  Assuming three channels for anything
-        // that is not RGBA reads three bytes per pixel out of a buffer holding
-        // one, which walks off the end of the allocation.
-        //
-        // GL_UNPACK_ALIGNMENT is 1 below, which matters here: a greyscale row
-        // is rarely a multiple of four bytes, and the default alignment of 4
-        // would shear the image.
-        uint32 Format = GL_RGB;
-        switch(ChannelCount)
-        {
-            case 1: { Format = GL_RED; } break;
-            case 2: { Format = GL_RG; } break;
-            case 3: { Format = GL_RGB; } break;
-            case 4: { Format = GL_RGBA; } break;
-        }
-
-        GL->glGenTextures(1, &Result);
-        GL->glBindTexture(GL_TEXTURE_2D, Result);
-
-        GL->glPixelStorei(GL_UNPACK_ALIGNMENT, 1); // rows are packed, not padded to 4
-
-        GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, WrapMode);
-        GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, WrapMode);
-        GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-        GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-        GL->glTexImage2D(GL_TEXTURE_2D, 0, (int32)Format, Width, Height, 0,
-                         Format, GL_UNSIGNED_BYTE, Pixels);
-        GL->glGenerateMipmap(GL_TEXTURE_2D);
+        // Mipmaps because a surface texture IS seen at a distance - a wall at
+        // the far end of the atrium covers fewer pixels than it has texels,
+        // and without them that shimmers as the camera moves.
+        Result = RendererUploadTexture(Renderer, Pixels,
+                                       (uint32)Width, (uint32)Height, (uint32)ChannelCount,
+                                       Wrap, TextureFilter_LinearMipmap);
 
         stbi_image_free(Pixels);
     }
@@ -92,11 +82,15 @@ GameLoadTexture(thread_context *Thread, game_memory *Memory, renderer *Renderer,
     return(Result);
 }
 
-// Builds "data\Tyre.png" from "data\peugeot.obj" and "Tyre.png".
+// Builds "data\textures\sponza_thorn_diff.png" out of "data\sponza.obj" and
+// "textures\sponza_thorn_diff.png".
 //
-// NOTE(yigit): A .mtl names its textures relative to itself, not to the working
+// NOTE(yigit): A .mtl names its textures relative to ITSELF, not to the working
 // directory, so the model's own folder has to be pasted back on.  Without this
-// the loader looks for "Tyre.png" beside the executable and finds nothing.
+// the loader looks for the texture beside the executable and finds nothing.
+//
+// The whole directory prefix is kept rather than just the last component,
+// which is what makes a map name with a subfolder in it work.
 internal void
 ObjMakeSiblingFileName(char *Dest, uint32 DestSize, const char *ObjName,
                        const char *SiblingName)
@@ -125,11 +119,12 @@ ObjMakeSiblingFileName(char *Dest, uint32 DestSize, const char *ObjName,
     Dest[Length] = 0;
 }
 
-// Turns "data\peugeot.obj" into "data\peugeot.mtl".
+// Turns "data\sponza.obj" into "data\sponza.mtl".
 //
 // NOTE(yigit): Derived from the model's own name rather than read from the
-// OBJ's "mtllib" line, which for this model names a file that was never
-// distributed with it.  The name beside the model is the one that exists.
+// OBJ's own "mtllib" line.  That line names whatever the exporter happened to
+// call the file, which is not always what is actually sitting next to the
+// model - and the name beside the model is the one that exists.
 internal void
 ObjMakeMaterialFileName(char *Dest, uint32 DestSize, const char *ObjName)
 {
@@ -162,7 +157,6 @@ internal loaded_font
 GameLoadFont(thread_context *Thread, game_memory *Memory, renderer *Renderer,
              memory_arena *Arena, const char *FileName, real32 PixelHeight)
 {
-    game_opengl_api *GL = Renderer->GL;
     loaded_font Result = {};
     Result.LineHeight = PixelHeight;
 
@@ -206,8 +200,8 @@ GameLoadFont(thread_context *Thread, game_memory *Memory, renderer *Renderer,
         real32 PenY = 0.0f;
         stbtt_aligned_quad Quad;
 
-        // The last argument is the fill rule: 1 for OpenGL's, which is what
-        // puts the quad on integer pixel boundaries and keeps glyphs crisp.
+        // The last argument is the fill rule.  1 is the one that puts the quad
+        // on integer pixel boundaries, which is what keeps glyphs crisp.
         stbtt_GetBakedQuad(Baked, (int32)AtlasDim, (int32)AtlasDim, (int32)I,
                            &PenX, &PenY, &Quad, 1);
 
@@ -221,27 +215,17 @@ GameLoadFont(thread_context *Thread, game_memory *Memory, renderer *Renderer,
         Glyph->XAdvance = PenX;
     }
 
-    GL->glGenTextures(1, &Result.Texture);
-    GL->glBindTexture(GL_TEXTURE_2D, Result.Texture);
-
-    // NOTE(yigit): Alignment 1 is required, not optional.  The atlas is one
-    // byte per pixel and 512 wide - the default alignment of 4 would be fine
-    // here by luck, but any other width would shear the whole atlas.
-    GL->glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-
-    // CLAMP_TO_EDGE, not REPEAT: glyphs are packed edge to edge, and a
-    // filtered sample at the border of one would otherwise bleed in a sliver
-    // of the glyph on the far side of the atlas.
-    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    // No mipmaps.  Text is drawn at 1:1 and never minified, so they would cost
-    // memory to build and never be sampled.
-    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-    GL->glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, (int32)AtlasDim, (int32)AtlasDim, 0,
-                     GL_RED, GL_UNSIGNED_BYTE, Bitmap);
+    // One channel: the atlas stores COVERAGE, not colour - how much of each
+    // pixel the glyph covers.  The colour comes from a uniform, so storing it
+    // per texel would waste three bytes on a value that never varies.
+    //
+    // ClampToEdge because glyphs are packed edge to edge: a filtered sample at
+    // one glyph'''s border would otherwise bleed in a sliver of whatever sits on
+    // the far side of the atlas.  And no mipmaps, because text is drawn at 1:1
+    // and never minified, so they would cost memory and never be sampled.
+    Result.Texture = RendererUploadTexture(Renderer, Bitmap, AtlasDim, AtlasDim, 1,
+                                           TextureWrap_ClampToEdge,
+                                           TextureFilter_Linear);
 
     return(Result);
 }
@@ -253,7 +237,7 @@ GameLoadFont(thread_context *Thread, game_memory *Memory, renderer *Renderer,
 // few dozen of them, cheaper than any structure built to avoid it.  It checks
 // BOTH name fields, because one material's diffuse map can be another
 // material's alpha mask, and uploading it twice would be silent waste.
-internal uint32
+internal texture_handle
 GameLoadMaterialTexture(thread_context *Thread, game_memory *Memory, renderer *Renderer,
                         const char *ObjFileName, const char *MapName,
                         render_submesh *Submeshes, uint32 SubmeshCount)
@@ -262,13 +246,13 @@ GameLoadMaterialTexture(thread_context *Thread, game_memory *Memory, renderer *R
     {
         render_submesh *Other = Submeshes + I;
 
-        if(Other->DiffuseTexture &&
+        if(IsValidHandle(Other->DiffuseTexture) &&
            ObjNamesMatch2(Other->Material.DiffuseMapName, MapName))
         {
             return(Other->DiffuseTexture);
         }
 
-        if(Other->AlphaTexture &&
+        if(IsValidHandle(Other->AlphaTexture) &&
            ObjNamesMatch2(Other->Material.AlphaMapName, MapName))
         {
             return(Other->AlphaTexture);
@@ -278,7 +262,8 @@ GameLoadMaterialTexture(thread_context *Thread, game_memory *Memory, renderer *R
     char TextureFileName[256];
     ObjMakeSiblingFileName(TextureFileName, sizeof(TextureFileName), ObjFileName, MapName);
 
-    return(GameLoadTexture(Thread, Memory, Renderer, TextureFileName, GL_REPEAT));
+    return(GameLoadTexture(Thread, Memory, Renderer, TextureFileName,
+                           TextureWrap_Repeat));
 }
 
 // Reads an OBJ, de-duplicates it into a vertex/index pair, and hands both to
@@ -292,7 +277,6 @@ internal render_model
 GameLoadModel(thread_context *Thread, game_memory *Memory, renderer *Renderer,
               memory_arena *Arena, const char *FileName)
 {
-    game_opengl_api *GL = Renderer->GL;
     render_model Result = {};
 
     ResetArena(Arena);
@@ -325,41 +309,9 @@ GameLoadModel(thread_context *Thread, game_memory *Memory, renderer *Renderer,
         return(Result);
     }
 
-    GL->glGenVertexArrays(1, &Result.VAO);
-    GL->glGenBuffers(1, &Result.VBO);
-    GL->glGenBuffers(1, &Result.EBO);
-
-    GL->glBindVertexArray(Result.VAO);
-
-    GL->glBindBuffer(GL_ARRAY_BUFFER, Result.VBO);
-    GL->glBufferData(GL_ARRAY_BUFFER, Model.VertexCount * sizeof(obj_vertex),
-                     Model.Vertices, GL_STATIC_DRAW);
-
-    // NOTE(yigit): Unlike GL_ARRAY_BUFFER, the ELEMENT buffer binding is stored
-    // IN THE VAO.  So it has to be bound while the VAO is bound, and it must
-    // not be unbound before the VAO is - unbind it first and the VAO forgets
-    // its index buffer and the model draws nothing.  Same ordering trap as the
-    // EBO in ch. 6.
-    GL->glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, Result.EBO);
-    GL->glBufferData(GL_ELEMENT_ARRAY_BUFFER, Model.IndexCount * sizeof(uint32),
-                     Model.Indices, GL_STATIC_DRAW);
-
-    // obj_vertex was laid out to match an 8-float stride exactly, so these are
-    // the three usual calls with sizeof doing the arithmetic.
-    GL->glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(obj_vertex),
-                              (void *)0);
-    GL->glEnableVertexAttribArray(0);
-
-    GL->glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, sizeof(obj_vertex),
-                              (void *)(3 * sizeof(real32)));
-    GL->glEnableVertexAttribArray(1);
-
-    GL->glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(obj_vertex),
-                              (void *)(6 * sizeof(real32)));
-    GL->glEnableVertexAttribArray(2);
-
-    GL->glBindVertexArray(0);
-
+    Result.Mesh = RendererUploadMesh(Renderer,
+                                     Model.Vertices, Model.VertexCount,
+                                     Model.Indices, Model.IndexCount);
     Result.IndexCount = Model.IndexCount;
 
     // ---- Materials ------------------------------------------------------
@@ -402,8 +354,8 @@ GameLoadModel(thread_context *Thread, game_memory *Memory, renderer *Renderer,
         Submesh->FirstIndex = Model.Submeshes[I].FirstIndex;
         Submesh->IndexCount = Model.Submeshes[I].IndexCount;
         Submesh->Material = Materials[Model.Submeshes[I].MaterialIndex];
-        Submesh->DiffuseTexture = 0;
-        Submesh->AlphaTexture = 0;
+        Submesh->DiffuseTexture = {};
+        Submesh->AlphaTexture = {};
 
         if(Submesh->Material.HasDiffuseMap)
         {

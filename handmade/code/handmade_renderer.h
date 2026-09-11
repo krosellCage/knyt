@@ -37,6 +37,27 @@ enum render_program
     RenderProgram_Count,
 };
 
+/*
+  How a texture should behave once it is on the GPU, described without naming
+  any api's constants.
+
+  NOTE(yigit): Every graphics api spells these as its own magic numbers, and
+  passing one of those down from the asset loaders would put that api straight
+  back into code just cleaned of it.  So the loaders say what they WANT, and
+  the backend picks whichever constant means it.
+*/
+enum texture_wrap
+{
+    TextureWrap_Repeat,         // tiles - what a surface texture wants
+    TextureWrap_ClampToEdge,    // stops at the border - what an atlas wants
+};
+
+enum texture_filter
+{
+    TextureFilter_Linear,           // no mipmaps: drawn at 1:1 and never shrunk
+    TextureFilter_LinearMipmap,     // build mipmaps: this will be seen at a distance
+};
+
 enum render_command_type
 {
     RenderCommand_Clear,
