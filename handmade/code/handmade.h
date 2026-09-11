@@ -161,6 +161,10 @@ struct render_model
 #include "handmade_camera.h"
 // NOTE(yigit): After the Push macros above - LoadWAV allocates with PushArray.
 #include "handmade_sound.h"
+// NOTE(yigit): game_state holds an overlay by value.  This header deliberately
+// calls OpenGL directly rather than using handmade_shader.h's uniform setters -
+// that file includes this one, so reaching for them would close the circle.
+#include "handmade_overlay.h"
 
 struct game_state
 {
@@ -178,8 +182,8 @@ struct game_state
 
     // NOTE(yigit): 3D rendering handles — created once in GameUpdateAndRender when
     // !Memory->IsInitialized, then reused every frame
-    uint32 ShaderProgram[2];
-    shader_watch ShaderWatches[2];
+    uint32 ShaderProgram[3];    // lit, lamp, overlay
+    shader_watch ShaderWatches[3];
 
     // NOTE(yigit): All geometry AND all textures are loaded from disk now.  The
     // hand-written cube vertex table that used to live in GameInitOpenGL is
@@ -193,6 +197,15 @@ struct game_state
     // white times Kd is Kd - so the shader never has to ask whether a texture
     // exists.  Cheaper than a branch, and it keeps one code path.
     uint32 WhiteTexture;
+
+    // 2D screen-space pass - debug text and anything else that sits on top of
+    // the scene.  Refilled from empty every frame.
+    overlay Overlay;
+
+    // NOTE(yigit): By value, and it holds only plain floats and a texture
+    // handle - no pointers into the arena the atlas was baked in, so it
+    // survives a DLL reload like everything else in here.
+    loaded_font DebugFont;
 
     // NOTE(yigit): Everything in PermanentStorage that comes AFTER game_state
     // itself.  Set up once via InitializeArena - see the !IsInitialized block

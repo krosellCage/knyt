@@ -251,6 +251,9 @@ XInitOpenGL(x_opengl_context *Context, Display *ClientDisplay, Window ClientWind
 
     // Core 1.1
     GL->glEnable                  = (PFNGLENABLEPROC)                 XGLGetProcAddress("glEnable", &AllLoaded);
+    GL->glDisable                 = (PFNGLDISABLEPROC)                XGLGetProcAddress("glDisable", &AllLoaded);
+    GL->glBlendFunc               = (PFNGLBLENDFUNCPROC)              XGLGetProcAddress("glBlendFunc", &AllLoaded);
+    GL->glDepthMask               = (PFNGLDEPTHMASKPROC)              XGLGetProcAddress("glDepthMask", &AllLoaded);
     GL->glClearColor              = (PFNGLCLEARCOLORPROC)             XGLGetProcAddress("glClearColor", &AllLoaded);
     GL->glClear                   = (PFNGLCLEARPROC)                  XGLGetProcAddress("glClear", &AllLoaded);
     GL->glDrawArrays              = (PFNGLDRAWARRAYSPROC)             XGLGetProcAddress("glDrawArrays", &AllLoaded);

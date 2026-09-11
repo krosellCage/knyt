@@ -46,6 +46,13 @@ typedef unsigned int   GLbitfield;
 #define GL_ARRAY_BUFFER             0x8892
 #define GL_STATIC_DRAW              0x88E4
 #define GL_DYNAMIC_DRAW             0x88E8
+
+// Book ch. 25 - blending.  SRC_ALPHA / ONE_MINUS_SRC_ALPHA is the standard
+// "over" operator: the incoming fragment contributes its own alpha, and what
+// is already in the framebuffer contributes the rest.
+#define GL_BLEND                    0x0BE2
+#define GL_SRC_ALPHA                0x0302
+#define GL_ONE_MINUS_SRC_ALPHA      0x0303
 #define GL_VERTEX_SHADER            0x8B31
 #define GL_FRAGMENT_SHADER          0x8B30
 #define GL_COMPILE_STATUS           0x8B81
@@ -159,6 +166,9 @@ typedef void   (GLAPIENTRY *PFNGLPIXELSTOREIPROC)              (GLenum pname, GL
 
 // Core 1.1 entry points (these come out of opengl32.dll, not wglGetProcAddress)
 typedef void   (GLAPIENTRY *PFNGLENABLEPROC)                   (GLenum cap);
+typedef void   (GLAPIENTRY *PFNGLDISABLEPROC)                  (GLenum cap);
+typedef void   (GLAPIENTRY *PFNGLBLENDFUNCPROC)                (GLenum sfactor, GLenum dfactor);
+typedef void   (GLAPIENTRY *PFNGLDEPTHMASKPROC)                (GLboolean flag);
 typedef void   (GLAPIENTRY *PFNGLCLEARCOLORPROC)               (GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
 typedef void   (GLAPIENTRY *PFNGLCLEARPROC)                    (GLbitfield mask);
 typedef void   (GLAPIENTRY *PFNGLDRAWARRAYSPROC)               (GLenum mode, GLint first, GLsizei count);
@@ -219,6 +229,9 @@ typedef struct game_opengl_api
 
     // Core 1.1
     PFNGLENABLEPROC                  glEnable;
+    PFNGLDISABLEPROC                 glDisable;
+    PFNGLBLENDFUNCPROC               glBlendFunc;
+    PFNGLDEPTHMASKPROC               glDepthMask;
     PFNGLCLEARCOLORPROC              glClearColor;
     PFNGLCLEARPROC                   glClear;
     PFNGLDRAWARRAYSPROC              glDrawArrays;

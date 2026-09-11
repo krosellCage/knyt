@@ -6,11 +6,12 @@ from someone else's.  The two are separated below.
 1. ORIGINAL WORK - MIT
 ===============================================================================
 
-Everything in handmade/code EXCEPT stb_image.h (see section 3), plus the
-README, the build scripts, the repository layout, and handmade/misc/cubes.mp4.
-That is the X11/ALSA platform layer, the OpenGL extension loading, the maths
-library, the camera, the WAV parser, the shader compilation and hot reloading,
-and the game layer that drives them.
+Everything in handmade/code EXCEPT stb_image.h and stb_truetype.h (see
+section 3), plus the README, the build scripts, the repository layout, and
+handmade/misc/cubes.mp4.  That is the X11/ALSA platform layer, the OpenGL
+extension loading, the maths library, the camera, the WAV parser, the shader
+compilation and hot reloading, the 2D overlay, and the game layer that drives
+them.
 
     MIT License
 
@@ -58,9 +59,9 @@ commercially without permission from the copyright holder.
 3. THIRD-PARTY CODE INCLUDED HERE
 ===============================================================================
 
-handmade/code/stb_image.h
+handmade/code/stb_image.h, handmade/code/stb_truetype.h
     by Sean Barrett.  Public domain (or MIT, at your option) - the dual-licence
-    notice at the end of that file governs it, not this one.
+    notice at the end of those files governs them, not this one.
     https://github.com/nothings/stb
 
 ===============================================================================

@@ -90,6 +90,13 @@ spotlight held at the camera with a soft-edged cone.
 Because the maths runs in view space, the camera is the origin looking down −Z
 by definition, so the flashlight needs no position or direction uniform at all.
 
+**Overlay** — `handmade_overlay.h`
+
+A 2D screen-space pass for debug text, with its own dynamic vertex buffer
+rewritten every frame, alpha blending for antialiased glyph edges, and a
+single-channel font atlas baked from a `.ttf` with stb_truetype. Shows frame
+time, camera position and triangle count.
+
 **Model loading** — `handmade_obj.h`
 
 A Wavefront OBJ and `.mtl` parser, replacing the book's use of Assimp. It walks
@@ -133,8 +140,9 @@ This is a learning project and it stands on other people's work.
   layer. That project targets XCB and this one targets Xlib, so the windowing
   code differs, but the approach was a guide.
 
-- **[stb_image](https://github.com/nothings/stb)** by Sean Barrett, public
-  domain. Image decoding.
+- **[stb_image and stb_truetype](https://github.com/nothings/stb)** by Sean
+  Barrett, public domain. Image decoding, and rasterizing glyph outlines from a
+  .ttf.
 
 - **Crytek Sponza**, the default test scene. Modelled by Frank Meinl at Crytek
   from Marko Dabrovic's 2002 original, and "donated to the public" per the
@@ -165,6 +173,15 @@ rather than rendering black or invisible.
 
 Without a model the load fails, logs which file it could not read, and the
 scene renders empty rather than crashing.
+
+### The debug overlay
+
+The on-screen readout needs a TrueType font at `handmade/data/font.ttf`. Any
+`.ttf` works - a monospace one reads best. None is shipped, since the obvious
+candidates are not redistributable; JetBrains Mono and Inconsolata are both SIL
+Open Font License if you want one you can commit.
+
+Without it the overlay draws nothing and the scene renders as normal.
 
 ## License
 

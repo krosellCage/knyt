@@ -20,6 +20,15 @@
 #include "stb_image.h"
 #pragma warning(pop)
 
+// NOTE(yigit): stb_truetype rasterizes glyph outlines from a .ttf - the part of
+// text rendering that is genuinely hard and teaches nothing about rendering.
+// It stays confined to this file: handmade_overlay.h defines its own font_glyph
+// so the 5000 lines below never reach game_state.
+#define STB_TRUETYPE_IMPLEMENTATION
+#pragma warning(push, 0)
+#include "stb_truetype.h"
+#pragma warning(pop)
+
 // NOTE(yigit): The game layer is platform-independent - no windows.h in here.
 // Anything we need from the platform arrives through game_memory.
 
@@ -175,6 +184,100 @@ ObjMakeMaterialFileName(char *Dest, uint32 DestSize, const char *ObjName)
         Dest[Length-2] = 't';
         Dest[Length-1] = 'l';
     }
+}
+
+/*
+  Bakes a .ttf into a single-channel atlas and a table of glyph quads.
+
+  NOTE(yigit): stbtt_BakeFontBitmap bakes ONE pixel size.  Scaling the result
+  goes blurry or blocky, which is fine for a debug overlay drawn at 1:1 and is
+  the reason scalable text needs signed distance fields instead.
+*/
+internal loaded_font
+GameLoadFont(thread_context *Thread, game_memory *Memory, game_opengl_api *GL,
+             memory_arena *Arena, const char *FileName, real32 PixelHeight)
+{
+    loaded_font Result = {};
+    Result.LineHeight = PixelHeight;
+
+    debug_read_file_result File = Memory->DEBUGPlatformReadEntireFile(Thread, FileName);
+    if(!File.Contents)
+    {
+        Memory->DEBUGPlatformLog(Thread, "ERROR: Failed to read font: ");
+        Memory->DEBUGPlatformLog(Thread, FileName);
+        Memory->DEBUGPlatformLog(Thread, "\n");
+        return(Result);
+    }
+
+    // Scratch, out of the transient arena - the bitmap is dead the moment it
+    // reaches the GPU, and so is the stb-side glyph table once it has been
+    // converted into font_glyphs below.
+    uint32 AtlasDim = 512;
+    uint8 *Bitmap = PushArray(Arena, AtlasDim*AtlasDim, uint8);
+    stbtt_bakedchar *Baked = PushArray(Arena, FONT_CHAR_COUNT, stbtt_bakedchar);
+
+    int32 BakeResult = stbtt_BakeFontBitmap((const uint8 *)File.Contents, 0, PixelHeight,
+                                            Bitmap, (int32)AtlasDim, (int32)AtlasDim,
+                                            FONT_FIRST_CHAR, FONT_CHAR_COUNT, Baked);
+
+    Memory->DEBUGPlatformFreeFileMemory(Thread, File.Contents);
+
+    // A negative return means the atlas was too small to hold every glyph.
+    if(BakeResult <= 0)
+    {
+        Memory->DEBUGPlatformLog(Thread, "ERROR: Font atlas too small: ");
+        Memory->DEBUGPlatformLog(Thread, FileName);
+        Memory->DEBUGPlatformLog(Thread, "\n");
+        return(Result);
+    }
+
+    // Ask stb where each glyph sits relative to a pen at the origin, once, and
+    // keep the answer.  Doing this per character per frame would call into
+    // stb_truetype for every letter drawn.
+    for(uint32 I = 0; I < FONT_CHAR_COUNT; ++I)
+    {
+        real32 PenX = 0.0f;
+        real32 PenY = 0.0f;
+        stbtt_aligned_quad Quad;
+
+        // The last argument is the fill rule: 1 for OpenGL's, which is what
+        // puts the quad on integer pixel boundaries and keeps glyphs crisp.
+        stbtt_GetBakedQuad(Baked, (int32)AtlasDim, (int32)AtlasDim, (int32)I,
+                           &PenX, &PenY, &Quad, 1);
+
+        font_glyph *Glyph = Result.Glyphs + I;
+        Glyph->X0 = Quad.x0;  Glyph->Y0 = Quad.y0;
+        Glyph->X1 = Quad.x1;  Glyph->Y1 = Quad.y1;
+        Glyph->U0 = Quad.s0;  Glyph->V0 = Quad.t0;
+        Glyph->U1 = Quad.s1;  Glyph->V1 = Quad.t1;
+
+        // PenX was advanced by the call, which is exactly the advance width.
+        Glyph->XAdvance = PenX;
+    }
+
+    GL->glGenTextures(1, &Result.Texture);
+    GL->glBindTexture(GL_TEXTURE_2D, Result.Texture);
+
+    // NOTE(yigit): Alignment 1 is required, not optional.  The atlas is one
+    // byte per pixel and 512 wide - the default alignment of 4 would be fine
+    // here by luck, but any other width would shear the whole atlas.
+    GL->glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+    // CLAMP_TO_EDGE, not REPEAT: glyphs are packed edge to edge, and a
+    // filtered sample at the border of one would otherwise bleed in a sliver
+    // of the glyph on the far side of the atlas.
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    // No mipmaps.  Text is drawn at 1:1 and never minified, so they would cost
+    // memory to build and never be sampled.
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    GL->glTexImage2D(GL_TEXTURE_2D, 0, GL_RED, (int32)AtlasDim, (int32)AtlasDim, 0,
+                     GL_RED, GL_UNSIGNED_BYTE, Bitmap);
+
+    return(Result);
 }
 
 // Loads a texture named by a material, reusing one already uploaded if an
@@ -462,6 +565,13 @@ GameInitOpenGL(thread_context *Thread, game_memory *Memory, game_state *State, g
                                  "data\\sponza.obj");
     State->WhiteTexture = GameCreateWhiteTexture(GL);
 
+    OverlayInitialize(&State->Overlay, GL, &State->WorldArena);
+
+    // TransientArena, not WorldArena - the atlas bitmap and stb's glyph table
+    // are both dead once the texture is uploaded and the quads are copied out.
+    State->DebugFont = GameLoadFont(Thread, Memory, GL, &State->TransientArena,
+                                    "data\\font.ttf", 18.0f);
+
     State->MarkerModel = GameLoadModel(Thread, Memory, GL, &State->TransientArena,
                                        "data\\cube.obj");
 
@@ -733,6 +843,7 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     // does not.
     uint32 LitProgram = State->ShaderProgram[0];
     uint32 LampProgram = State->ShaderProgram[1];
+    uint32 OverlayProgram = State->ShaderProgram[2];
 
     // ---------------------------------------------------------------------
     // The model
@@ -772,6 +883,43 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     }
 
     GL->glBindVertexArray(0);
+
+    // ---------------------------------------------------------------------
+    // The 2D overlay - drawn last, so it sits on top of everything
+    // ---------------------------------------------------------------------
+    OverlayReset(&State->Overlay);
+
+    // NOTE(yigit): TOP-left origin - Bottom and Top are passed the other way
+    // round from the usual OpenGL convention, so Y grows DOWNWARD.  That is
+    // what stb_truetype's glyph offsets assume and what text layout is
+    // naturally expressed in, so matching it here means no per-quad flipping.
+    mat4 OverlayProjection = Mat4Ortho(0.0f, (real32)Input->WindowWidth,
+                                       (real32)Input->WindowHeight, 0.0f,
+                                       -1.0f, 1.0f);
+
+    {
+        char Line[128];
+        real32 LineY = State->DebugFont.LineHeight + 6.0f;
+
+        snprintf(Line, sizeof(Line), "%.2f ms  %.0f fps",
+                 1000.0f*Input->dtForFrame,
+                 (Input->dtForFrame > 0.0f) ? (1.0f / Input->dtForFrame) : 0.0f);
+        OverlayPushText(&State->Overlay, &State->DebugFont, 12.0f, LineY, Line);
+        LineY += State->DebugFont.LineHeight;
+
+        snprintf(Line, sizeof(Line), "pos %.1f %.1f %.1f   speed %.1f",
+                 State->Camera.Position.X, State->Camera.Position.Y,
+                 State->Camera.Position.Z, State->Camera.MovementSpeed);
+        OverlayPushText(&State->Overlay, &State->DebugFont, 12.0f, LineY, Line);
+        LineY += State->DebugFont.LineHeight;
+
+        snprintf(Line, sizeof(Line), "%u tris  %u submeshes",
+                 State->Model.IndexCount / 3, State->Model.SubmeshCount);
+        OverlayPushText(&State->Overlay, &State->DebugFont, 12.0f, LineY, Line);
+    }
+
+    OverlayFlush(&State->Overlay, GL, OverlayProgram, OverlayProjection,
+                 State->DebugFont.Texture, Vec3(0.95f, 0.93f, 0.85f));
 
 }
 

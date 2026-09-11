@@ -54,3 +54,6 @@ handmade/data/Tyre.png
 handmade/data/sponza.obj
 handmade/data/sponza.mtl
 handmade/data/textures/
+
+# Consolas - Microsoft licensed, not mine to redistribute.
+handmade/data/font.ttf

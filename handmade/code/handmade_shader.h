@@ -131,6 +131,7 @@ global_variable const shader_source_files GlobalShaderFiles[] =
 {
     {"data\\vertexShader.vert", "data\\fragmentShader.frag"},
     {"data\\vertexShader.vert", "data\\lightCube.frag"},
+    {"data\\overlay.vert",      "data\\overlay.frag"},
 };
 
 // Builds a complete program, or returns 0 if any stage failed.  Nothing the
