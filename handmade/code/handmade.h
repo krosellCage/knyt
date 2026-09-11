@@ -159,6 +159,9 @@ struct render_model
 // holds a camera by value.  It needs Pi32 and the internal macro, both defined
 // above.
 #include "handmade_camera.h"
+// NOTE(yigit): game_state holds a render_buffer, and the renderer needs
+// render_model which is declared above.  No OpenGL in that header by design.
+#include "handmade_renderer.h"
 // NOTE(yigit): After the Push macros above - LoadWAV allocates with PushArray.
 #include "handmade_sound.h"
 // NOTE(yigit): game_state holds an overlay by value.  This header deliberately
@@ -206,6 +209,10 @@ struct game_state
     // handle - no pointers into the arena the atlas was baked in, so it
     // survives a DLL reload like everything else in here.
     loaded_font DebugFont;
+
+    // What the game says it wants drawn.  Filled every frame, executed by the
+    // backend, reset at the top of the next one.
+    render_buffer RenderBuffer;
 
     // NOTE(yigit): Everything in PermanentStorage that comes AFTER game_state
     // itself.  Set up once via InitializeArena - see the !IsInitialized block

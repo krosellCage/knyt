@@ -21,6 +21,26 @@
 #include "handmade_assets.h"
 #include "handmade_render.h"
 
+// NOTE(yigit): Scene data, and it lives in the game layer now rather than in
+// the backend.  That is the push buffer's actual effect: the scene says what
+// its lights are, and the backend only decides how to express them.
+
+// Book ch. 17.1 - the sun.  World space, pointing INTO the scene: down and
+// slightly back-left.
+global_variable const vec3 GlobalDirLightDirection = {-0.2f, -1.0f, -0.3f};
+
+// Book ch. 17.3, p. 176 - four point lights.  WORLD space; the backend
+// converts to view space, because which space this renderer lights in is not
+// something the scene should have to know.  A lamp marker is drawn at each, so
+// what you see is where the light is.
+global_variable const vec3 GlobalPointLightPositions[] =
+{
+    { 0.7f,  0.2f,   2.0f},
+    { 2.3f, -3.3f,  -4.0f},
+    {-4.0f,  2.0f, -12.0f},
+    { 0.0f,  0.0f,  -3.0f},
+};
+
 internal void
 GameInitOpenGL(thread_context *Thread, game_memory *Memory, game_state *State, game_opengl_api *GL)
 {
@@ -38,9 +58,6 @@ GameInitOpenGL(thread_context *Thread, game_memory *Memory, game_state *State, g
     // are both dead once the texture is uploaded and the quads are copied out.
     State->DebugFont = GameLoadFont(Thread, Memory, GL, &State->TransientArena,
                                     "data\\font.ttf", 18.0f);
-
-    State->MarkerModel = GameLoadModel(Thread, Memory, GL, &State->TransientArena,
-                                       "data\\cube.obj");
 
     // NOTE(yigit): Required now that there is a solid object.  Without it the
     // back faces draw over the front ones in whatever order they happen to be
@@ -76,6 +93,12 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
         InitializeArena(&State->TransientArena,
                         (memory_index)Memory->TransientStorageSize,
                         (uint8 *)Memory->TransientStorage);
+
+        // NOTE(yigit): A megabyte of command buffer, out of WorldArena so the
+        // allocation happens once.  The BUFFER is reset every frame, not the
+        // arena - the arena hands out its block a single time and never again.
+        RenderBufferInitialize(&State->RenderBuffer, &State->WorldArena,
+                               Megabytes(1));
 
         // NOTE(yigit): PermanentStorage starts zeroed, so these would be all
         // zeros - and a zero-length CameraFront would make LookAt degenerate.
@@ -175,45 +198,69 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
 
     // ------------------------------------------------------------------
     // Render
+    //
+    // NOTE(yigit): Nothing below calls OpenGL.  It describes a frame into a
+    // buffer, and RenderBufferExecute at the bottom turns that description
+    // into GL calls.  Swapping in a Vulkan backend means writing a second
+    // RenderBufferExecute and changing nothing here.
     // ------------------------------------------------------------------
+    RenderBufferReset(&State->RenderBuffer);
 
-    GL->glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    GL->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    PushClear(&State->RenderBuffer, Vec4(0.0f, 0.0f, 0.0f, 1.0f));
 
-    vec3 LightColor =  Vec3(1.0f, 1.0f, 1.0f);
+    render_command_setup *Setup = PushSetup(&State->RenderBuffer, View, Projection);
+    if(Setup)
+    {
+        Setup->DirLightDirectionWorld = GlobalDirLightDirection;
+        Setup->DirAmbient  = Vec3(0.05f, 0.05f, 0.05f);
+        Setup->DirDiffuse  = Vec3(0.40f, 0.40f, 0.40f);
+        Setup->DirSpecular = Vec3(0.50f, 0.50f, 0.50f);
 
-    vec3 DiffuseColor = LightColor * 0.5f;
-    vec3 AmbientColor = DiffuseColor * 0.2f;
+        Setup->PointLightCount = ArrayCount(GlobalPointLightPositions);
+        Assert(Setup->PointLightCount <= ArrayCount(Setup->PointLights));
 
+        for(uint32 LightIndex = 0;
+            LightIndex < Setup->PointLightCount;
+            ++LightIndex)
+        {
+            render_point_light *Light = Setup->PointLights + LightIndex;
 
-    // NOTE(yigit): Named here rather than spelled State->ShaderProgram[N] at
-    // every call site.  The names say which program is which; the array index
-    // does not.
-    uint32 LitProgram = State->ShaderProgram[0];
-    uint32 LampProgram = State->ShaderProgram[1];
-    uint32 OverlayProgram = State->ShaderProgram[2];
+            Light->PositionWorld = GlobalPointLightPositions[LightIndex];
+            Light->Ambient  = Vec3(0.05f, 0.05f, 0.05f);
+            Light->Diffuse  = Vec3(0.80f, 0.80f, 0.80f);
+            Light->Specular = Vec3(1.00f, 1.00f, 1.00f);
 
-    // ---------------------------------------------------------------------
-    // The model
-    // ---------------------------------------------------------------------
-    SetLitUniforms(GL, LitProgram, View, Projection, AmbientColor, DiffuseColor);
+            // Book ch. 16.2 - the table row for a range of about 50 units.
+            Light->Constant  = 1.0f;
+            Light->Linear    = 0.09f;
+            Light->Quadratic = 0.032f;
+        }
 
-    GL->glUseProgram(LitProgram);
+        // The flashlight held at the camera.  No position or direction: in view
+        // space the camera is the origin looking down -Z, so the shader has
+        // both as constants.
+        Setup->SpotAmbient  = Vec3(0.10f, 0.10f, 0.10f);
+        Setup->SpotDiffuse  = Vec3(0.50f, 0.50f, 0.50f);
+        Setup->SpotSpecular = Vec3(1.00f, 1.00f, 1.00f);
+        Setup->SpotConstant  = 1.0f;
+        Setup->SpotLinear    = 0.09f;
+        Setup->SpotQuadratic = 0.032f;
+
+        // NOTE(yigit): Converted to cosines HERE, once, rather than in the
+        // backend every frame.  Cos takes radians - passing 12.5 raw would be
+        // 12.5 radians, which works out as a 3.8 degree cone: wrong, but close
+        // enough to look plausible.
+        Setup->SpotCutOff      = Cos(12.5f*Pi32 / 180.0f);
+        Setup->SpotOuterCutOff = Cos(17.5f*Pi32 / 180.0f);
+    }
 
     // NOTE(yigit): Sponza is modelled at roughly 3700 x 1550 x 2300 units and
-    // the projection has a far plane of 100, so at native scale the whole
-    // atrium sits outside the frustum.  Scaling the model is the right fix
-    // rather than pushing the far plane out to 5000, which would spend the
-    // depth buffer on empty space and bring back z-fighting.
-    GameDrawModel(GL, LitProgram, &State->Model,
-                  Mat4Scale(0.02f, 0.02f, 0.02f), State->WhiteTexture);
-
-    // ---------------------------------------------------------------------
-    // The light markers - one per point light, so you can see where they are
-    // ---------------------------------------------------------------------
-    SetLampUniforms(GL, LampProgram, View, Projection, LightColor);
-
-    GL->glUseProgram(LampProgram);
+    // the far plane is 500, so at native scale most of the atrium sits outside
+    // the frustum.  Scaling the model is the right fix rather than pushing far
+    // out to 5000, which would spend the depth buffer on empty space and bring
+    // back z-fighting.
+    PushModel(&State->RenderBuffer, &State->Model,
+              Mat4Scale(0.02f, 0.02f, 0.02f), RenderProgram_Lit);
 
     for(uint32 LightIndex = 0;
         LightIndex < ArrayCount(GlobalPointLightPositions);
@@ -224,13 +271,28 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
         // Scale on the RIGHT so it happens first: shrink the cube at the
         // origin, then move it out to the light.  The other order would scale
         // the translation too and put the marker at a fifth of the distance.
-        GameDrawModel(GL, LampProgram, &State->MarkerModel,
-                      Mat4Mul(Mat4Translation(P.X, P.Y, P.Z),
-                              Mat4Scale(0.2f, 0.2f, 0.2f)),
-                      State->WhiteTexture);
+        PushModel(&State->RenderBuffer, &State->MarkerModel,
+                  Mat4Mul(Mat4Translation(P.X, P.Y, P.Z),
+                          Mat4Scale(0.2f, 0.2f, 0.2f)),
+                  RenderProgram_Lamp);
     }
 
-    GL->glBindVertexArray(0);
+    // ------------------------------------------------------------------
+    // Execute
+    //
+    // NOTE(yigit): The program handles are gathered here every frame rather
+    // than kept in the backend, because shader hot reload relinks them and a
+    // stored handle would be stale the moment a .frag is saved.
+    // ------------------------------------------------------------------
+    opengl_backend Backend = {};
+    Backend.GL = GL;
+    Backend.Programs[RenderProgram_Lit]  = State->ShaderProgram[0];
+    Backend.Programs[RenderProgram_Lamp] = State->ShaderProgram[1];
+    Backend.WhiteTexture = State->WhiteTexture;
+
+    RenderBufferExecute(&Backend, &State->RenderBuffer);
+
+    uint32 OverlayProgram = State->ShaderProgram[2];
 
     // ---------------------------------------------------------------------
     // The 2D overlay - drawn last, so it sits on top of everything

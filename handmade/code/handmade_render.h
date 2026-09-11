@@ -1,31 +1,30 @@
 #if !defined(HANDMADE_RENDER_H)
 /*
-  NOTE(yigit): The per-frame drawing side - what the lights are, what the
-  uniforms for each program are, and how one model gets drawn.  Split out of
-  handmade.cpp alongside handmade_assets.h.
+  NOTE(yigit): The OpenGL BACKEND.  It reads the command buffer that
+  handmade_renderer.h defines and turns each command into GL calls.
 
-  The line between this file and that one is WHEN the code runs: assets load
-  once at startup, this runs every frame.
+  This is the only file on the game side that still knows OpenGL exists.  When
+  a Vulkan backend arrives it will be a second file beside this one,
+  implementing the same one function against the same command stream - and
+  nothing in handmade.cpp will change.
 
-  NOT a renderer abstraction.  These functions still call OpenGL directly and
-  still take a game_opengl_api - that is the seam the push buffer will cut
-  later, and moving files around does not cut it.
+  Everything here is per frame.  Loading assets is handmade_assets.h.
 */
 
-// Book ch. 17.1 - the sun.  World space, pointing INTO the scene: down and
-// slightly back-left, so it lights the tops of the containers.
-global_variable const vec3 GlobalDirLightDirection = {-0.2f, -1.0f, -0.3f};
-
-// Book ch. 17.3, p. 176 - four point lights scattered among the containers.
-// WORLD space; SetPointLightUniforms converts each one to view space.  A lamp
-// marker is drawn at each, so what you see is where the light is.
-global_variable const vec3 GlobalPointLightPositions[] =
+// Everything a GL backend needs to execute a command, gathered so it is one
+// parameter rather than three.
+//
+// NOTE(yigit): Programs is indexed by render_program, NOT by the raw
+// ShaderProgram array.  The mapping from role to handle lives here on purpose:
+// a GLuint in the command stream would be OpenGL leaking into a file that is
+// supposed to have none.
+struct opengl_backend
 {
-    { 0.7f,  0.2f,   2.0f},
-    { 2.3f, -3.3f,  -4.0f},
-    {-4.0f,  2.0f, -12.0f},
-    { 0.0f,  0.0f,  -3.0f},
+    game_opengl_api *GL;
+    uint32 Programs[RenderProgram_Count];
+    uint32 WhiteTexture;
 };
+
 
 // Draws one loaded model, a submesh at a time, setting that submesh's material
 // before each call.
@@ -108,90 +107,93 @@ GameDrawModel(game_opengl_api *GL, uint32 Program, render_model *Model,
 // name it is handed - nothing keeps a pointer to it after the call returns.
 internal void
 SetPointLightUniforms(game_opengl_api *GL, uint32 Program, uint32 Index,
-                      vec3 PositionView)
+                      render_point_light *Light, vec3 PositionView)
 {
     char Name[64];
 
     snprintf(Name, sizeof(Name), "pointLights[%u].position", Index);
     SetUniformVec3(GL, Program, Name, PositionView);
 
-    // Book ch. 16.2 - the table row for a range of about 50 units.
     snprintf(Name, sizeof(Name), "pointLights[%u].constant", Index);
-    SetUniformFloat(GL, Program, Name, 1.0f);
+    SetUniformFloat(GL, Program, Name, Light->Constant);
     snprintf(Name, sizeof(Name), "pointLights[%u].linear", Index);
-    SetUniformFloat(GL, Program, Name, 0.09f);
+    SetUniformFloat(GL, Program, Name, Light->Linear);
     snprintf(Name, sizeof(Name), "pointLights[%u].quadratic", Index);
-    SetUniformFloat(GL, Program, Name, 0.032f);
+    SetUniformFloat(GL, Program, Name, Light->Quadratic);
 
     snprintf(Name, sizeof(Name), "pointLights[%u].ambient", Index);
-    SetUniformVec3(GL, Program, Name, 0.05f, 0.05f, 0.05f);
+    SetUniformVec3(GL, Program, Name, Light->Ambient);
     snprintf(Name, sizeof(Name), "pointLights[%u].diffuse", Index);
-    SetUniformVec3(GL, Program, Name, 0.8f, 0.8f, 0.8f);
+    SetUniformVec3(GL, Program, Name, Light->Diffuse);
     snprintf(Name, sizeof(Name), "pointLights[%u].specular", Index);
-    SetUniformVec3(GL, Program, Name, 1.0f, 1.0f, 1.0f);
+    SetUniformVec3(GL, Program, Name, Light->Specular);
 }
 
+/*
+  Uploads one Setup command to the lit program.
+
+  NOTE(yigit): Every value now arrives in the command rather than from a global
+  in this file.  That is the actual change the push buffer makes - the scene
+  describes its lights, and the backend only decides how to express them.
+
+  The world-to-view conversion stays here on purpose: which space this renderer
+  lights in is a rendering decision, not something the scene should have to
+  know about.
+*/
 internal void
-SetLitUniforms(game_opengl_api *GL, uint32 Program,
-               mat4 View, mat4 Projection,
-               vec3 AmbientColor, vec3 DiffuseColor)
+SetLitUniforms(game_opengl_api *GL, uint32 Program, render_command_setup *Setup)
 {
-    SetUniformMat4(GL, Program, "view", View);
-    SetUniformMat4(GL, Program, "projection", Projection);
+    SetUniformMat4(GL, Program, "view", Setup->View);
+    SetUniformMat4(GL, Program, "projection", Setup->Projection);
 
     // NOTE(yigit): material.shininess, diffuseColor and specularColor are NOT
-    // set here any more - they vary per submesh, so GameDrawModel sets them
-    // immediately before each draw.
+    // set here - they vary per submesh, so GameDrawModel sets them immediately
+    // before each draw.
 
     // The SPOTLIGHT - the flashlight held at the camera.  It needs no position
     // or direction uniform: in view space the camera is the origin looking down
     // -Z, so the shader has both as constants.
-    SetUniformVec3(GL, Program, "spotLight.ambient",  AmbientColor);
-    SetUniformVec3(GL, Program, "spotLight.diffuse",  DiffuseColor);
-    SetUniformVec3(GL, Program, "spotLight.specular", 1.0f, 1.0f, 1.0f);
+    SetUniformVec3(GL, Program, "spotLight.ambient",  Setup->SpotAmbient);
+    SetUniformVec3(GL, Program, "spotLight.diffuse",  Setup->SpotDiffuse);
+    SetUniformVec3(GL, Program, "spotLight.specular", Setup->SpotSpecular);
 
-    // Book ch. 16.2 - the table row for a range of about 50 units.  The
-    // 3250-unit row (0.0014 / 0.000007) gives no visible falloff in a scene
-    // this small.
-    SetUniformFloat(GL, Program, "spotLight.constant", 1.0f);
-    SetUniformFloat(GL, Program, "spotLight.linear", 0.09f);
-    SetUniformFloat(GL, Program, "spotLight.quadratic", 0.032f);
+    SetUniformFloat(GL, Program, "spotLight.constant",  Setup->SpotConstant);
+    SetUniformFloat(GL, Program, "spotLight.linear",    Setup->SpotLinear);
+    SetUniformFloat(GL, Program, "spotLight.quadratic", Setup->SpotQuadratic);
 
-    // Cos takes RADIANS.  Passing 12.5 raw is 12.5 radians, which works out as
-    // a 3.8 degree cone - wrong, but close enough to look plausible.
-    SetUniformFloat(GL, Program, "spotLight.cutOff", Cos(12.5f*Pi32 / 180.0f));
-    SetUniformFloat(GL, Program, "spotLight.outerCutOff", Cos(17.5f*Pi32 / 180.0f));
+    // Already cosines by the time they arrive - the scene converts from degrees
+    // once, rather than this doing it every frame.
+    SetUniformFloat(GL, Program, "spotLight.cutOff",      Setup->SpotCutOff);
+    SetUniformFloat(GL, Program, "spotLight.outerCutOff", Setup->SpotOuterCutOff);
 
-    // Book ch. 17.1 - the directional light.  Its direction is given in WORLD
-    // space and has to reach the shader in VIEW space, like everything else in
-    // this pipeline.
+    // Book ch. 17.1 - the directional light.
     //
     // NOTE(yigit): W is 0, not 1.  A direction has no location, so the view
-    // matrix's translation column must not touch it - the same reason the
-    // vertex shader used mat3(view) back when this lived there.
-    vec4 DirView = View * Vec4(GlobalDirLightDirection, 0.0f);
+    // matrix's translation column must not touch it.
+    vec4 DirView = Setup->View * Vec4(Setup->DirLightDirectionWorld, 0.0f);
     SetUniformVec3(GL, Program, "dirLight.direction",
                    Vec3(DirView.X, DirView.Y, DirView.Z));
 
-    SetUniformVec3(GL, Program, "dirLight.ambient",  0.05f, 0.05f, 0.05f);
-    SetUniformVec3(GL, Program, "dirLight.diffuse",  0.4f,  0.4f,  0.4f);
-    SetUniformVec3(GL, Program, "dirLight.specular", 0.5f,  0.5f,  0.5f);
+    SetUniformVec3(GL, Program, "dirLight.ambient",  Setup->DirAmbient);
+    SetUniformVec3(GL, Program, "dirLight.diffuse",  Setup->DirDiffuse);
+    SetUniformVec3(GL, Program, "dirLight.specular", Setup->DirSpecular);
 
-    // Book ch. 17.2 - the four point lights.
+    // Book ch. 17.2 - the point lights.
     //
     // NOTE(yigit): W is 1 here, not 0.  A position DOES get slid by the view
     // matrix's translation - that is the entire difference from the direction
     // above, and getting it backwards is the classic way to end up with lights
     // that drift as the camera moves.
     for(uint32 LightIndex = 0;
-        LightIndex < ArrayCount(GlobalPointLightPositions);
+        LightIndex < Setup->PointLightCount;
         ++LightIndex)
     {
-        vec4 PosView = View * Vec4(GlobalPointLightPositions[LightIndex], 1.0f);
-        SetPointLightUniforms(GL, Program, LightIndex,
+        render_point_light *Light = Setup->PointLights + LightIndex;
+        vec4 PosView = Setup->View * Vec4(Light->PositionWorld, 1.0f);
+
+        SetPointLightUniforms(GL, Program, LightIndex, Light,
                               Vec3(PosView.X, PosView.Y, PosView.Z));
     }
-
 
     // Which texture unit each sampler reads from.  Constant, but uniforms do
     // not survive a program rebuild, so they are re-sent every frame like the
@@ -205,15 +207,75 @@ SetLitUniforms(game_opengl_api *GL, uint32 Program,
 // program.  Uniforms belong to a program, not to the context - the ones set
 // over there simply do not exist in this one.
 internal void
-SetLampUniforms(game_opengl_api *GL, uint32 Program,
-                mat4 View, mat4 Projection, vec3 LightColor)
+SetLampUniforms(game_opengl_api *GL, uint32 Program, render_command_setup *Setup)
 {
-    SetUniformMat4(GL, Program, "view", View);
-    SetUniformMat4(GL, Program, "projection", Projection);
+    SetUniformMat4(GL, Program, "view", Setup->View);
+    SetUniformMat4(GL, Program, "projection", Setup->Projection);
 
     // Book ch. 14.4 exercise 1 - the marker takes the light's own colour, so
     // the lamp visibly matches what it is casting.
-    SetUniformVec4(GL, Program, "LightColor", LightColor, 1.0f);
+    SetUniformVec4(GL, Program, "LightColor", Setup->SpotSpecular, 1.0f);
+}
+
+/*
+  Walks the command buffer and executes it.  The entire backend is this one
+  function plus the helpers above.
+
+  NOTE(yigit): The walk steps by Header->Size, not by the sizeof of whatever
+  type the switch matched.  That is what lets a command this backend does not
+  recognise be skipped rather than desynchronising the whole stream.
+*/
+internal void
+RenderBufferExecute(opengl_backend *Backend, render_buffer *Buffer)
+{
+    game_opengl_api *GL = Backend->GL;
+
+    // Uniforms shared by a whole frame arrive in a Setup command, and the draws
+    // that follow need them.  Remembered rather than re-read, so a draw never
+    // has to search backwards through the buffer.
+    render_command_setup *Setup = 0;
+
+    uint8 *At = Buffer->Base;
+    uint8 *End = Buffer->Base + Buffer->Used;
+
+    while(At < End)
+    {
+        render_command_header *Header = (render_command_header *)At;
+
+        switch(Header->Type)
+        {
+            case RenderCommand_Clear:
+            {
+                render_command_clear *Command = (render_command_clear *)Header;
+                GL->glClearColor(Command->Color.X, Command->Color.Y,
+                                 Command->Color.Z, Command->Color.W);
+                GL->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            } break;
+
+            case RenderCommand_Setup:
+            {
+                Setup = (render_command_setup *)Header;
+
+                // Both programs are told, and neither can be told lazily -
+                // uniforms belong to a program, not to the context.
+                SetLitUniforms(GL, Backend->Programs[RenderProgram_Lit], Setup);
+                SetLampUniforms(GL, Backend->Programs[RenderProgram_Lamp], Setup);
+            } break;
+
+            case RenderCommand_DrawModel:
+            {
+                render_command_draw_model *Command = (render_command_draw_model *)Header;
+
+                uint32 Program = Backend->Programs[Command->Program];
+                GameDrawModel(GL, Program, Command->Model, Command->Transform,
+                              Backend->WhiteTexture);
+            } break;
+        }
+
+        At += Header->Size;
+    }
+
+    GL->glBindVertexArray(0);
 }
 
 #define HANDMADE_RENDER_H
