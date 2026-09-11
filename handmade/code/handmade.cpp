@@ -18,8 +18,10 @@
 // which both use it.
 #include <stdio.h>
 
-#include "handmade_assets.h"
+// NOTE(yigit): render BEFORE assets now - the loaders take a renderer and use
+// its GL pointer, so the struct has to be declared first.
 #include "handmade_render.h"
+#include "handmade_assets.h"
 
 // NOTE(yigit): Scene data, and it lives in the game layer now rather than in
 // the backend.  That is the push buffer's actual effect: the scene says what
@@ -42,28 +44,24 @@ global_variable const vec3 GlobalPointLightPositions[] =
 };
 
 internal void
-GameInitOpenGL(thread_context *Thread, game_memory *Memory, game_state *State, game_opengl_api *GL)
+GameInitScene(thread_context *Thread, game_memory *Memory, game_state *State)
 {
     // NOTE(yigit): Both meshes come off disk now.  The 36-vertex cube table
     // that used to sit here - six faces written out by hand with their normals
     // - is gone, and so are the ten hardcoded container positions.  Anything
     // that wants a cube loads cube.obj.
-    State->Model = GameLoadModel(Thread, Memory, GL, &State->TransientArena,
+    State->Model = GameLoadModel(Thread, Memory, State->Renderer, &State->TransientArena,
                                  "data\\sponza.obj");
-    State->WhiteTexture = GameCreateWhiteTexture(GL);
 
-    OverlayInitialize(&State->Overlay, GL, &State->WorldArena);
+    State->MarkerModel = GameLoadModel(Thread, Memory, State->Renderer, &State->TransientArena,
+                                       "data\\cube.obj");
+
+    OverlayInitialize(&State->Overlay, State->Renderer->GL, &State->WorldArena);
 
     // TransientArena, not WorldArena - the atlas bitmap and stb's glyph table
     // are both dead once the texture is uploaded and the quads are copied out.
-    State->DebugFont = GameLoadFont(Thread, Memory, GL, &State->TransientArena,
+    State->DebugFont = GameLoadFont(Thread, Memory, State->Renderer, &State->TransientArena,
                                     "data\\font.ttf", 18.0f);
-
-    // NOTE(yigit): Required now that there is a solid object.  Without it the
-    // back faces draw over the front ones in whatever order they happen to be
-    // listed, and the object looks turned inside out.  The depth buffer is
-    // already cleared every frame and the context already has 24 depth bits.
-    GL->glEnable(GL_DEPTH_TEST);
 }
 
 extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
@@ -73,7 +71,6 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     Assert(sizeof(game_state) <= Memory->PermanentStorageSize);
 
     game_state *State = (game_state *)Memory->PermanentStorage;
-    game_opengl_api *GL = &Memory->OpenGL;
 
     if(!Memory->IsInitialized)
     {
@@ -109,16 +106,20 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
         State->Music = LoadWAV(Thread, Memory, &State->WorldArena, "data\\cakkidikabusu.wav");
 
 
-        GameInitOpenGL(Thread, Memory, State, GL);
+        // NOTE(yigit): The renderer comes first - every loader below takes one
+        // and pulls its api pointer out of it.
+        State->Renderer = RendererInitialize(Memory, &State->WorldArena);
+
+        GameInitScene(Thread, Memory, State);
         Memory->IsInitialized = true;
     }
 
     // NOTE(yigit): Builds the programs on the first frame and rebuilds any of
     // them whose .vert/.frag changed on disk since the last frame.  Unlike
-    // GameInitOpenGL this is deliberately outside the IsInitialized guard, so
+    // GameInitScene this is deliberately outside the IsInitialized guard, so
     // it keeps working across DLL reloads too.
 
-    GameUpdateShaderPrograms(Thread, Memory, State, GL);
+    RendererUpdateShaders(State->Renderer, Thread, Memory);
 
     State->TimeSeconds += Input->dtForFrame;
 
@@ -328,14 +329,7 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     // than kept in the backend, because shader hot reload relinks them and a
     // stored handle would be stale the moment a .frag is saved.
     // ------------------------------------------------------------------
-    opengl_backend Backend = {};
-    Backend.GL = GL;
-    Backend.Programs[RenderProgram_Lit]     = State->ShaderProgram[0];
-    Backend.Programs[RenderProgram_Lamp]    = State->ShaderProgram[1];
-    Backend.Programs[RenderProgram_Overlay] = State->ShaderProgram[2];
-    Backend.WhiteTexture = State->WhiteTexture;
-
-    RenderBufferExecute(&Backend, &State->RenderBuffer);
+    RenderBufferExecute(State->Renderer, &State->RenderBuffer);
 }
 
 extern "C" GAME_GET_SOUND_SAMPLES(GameGetSoundSamples)

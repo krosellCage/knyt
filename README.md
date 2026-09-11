@@ -82,11 +82,12 @@ into the platform's audio ring buffer with looping.
 
 **Renderer command buffer** — `handmade_renderer.h`, `handmade_render.h`
 
-The game does not call OpenGL to draw. It pushes tagged, variable-sized
-commands into a buffer, and a backend walks that buffer and executes them.
-`handmade_renderer.h` contains no OpenGL by design; `handmade_render.h` is the
-OpenGL backend, and a second one can sit beside it without the game layer
-changing. Groundwork for a Vulkan path.
+The game layer contains no OpenGL at all. It pushes tagged, variable-sized
+commands into a buffer and holds the renderer as an incomplete type it cannot
+see inside; a backend walks that buffer and executes it.
+`handmade_renderer.h` has no OpenGL by design, `handmade_render.h` is the
+OpenGL backend, and a second backend can sit beside it without the game layer
+changing a line. Groundwork for a Vulkan path.
 
 **Lighting** — `handmade_render.h`
 

@@ -25,9 +25,10 @@
 #pragma warning(pop)
 
 internal uint32
-GameLoadTexture(thread_context *Thread, game_memory *Memory, game_opengl_api *GL,
+GameLoadTexture(thread_context *Thread, game_memory *Memory, renderer *Renderer,
                 const char *FileName, uint32 WrapMode)
 {
+    game_opengl_api *GL = Renderer->GL;
     uint32 Result = 0;
 
     debug_read_file_result File = Memory->DEBUGPlatformReadEntireFile(Thread, FileName);
@@ -158,9 +159,10 @@ ObjMakeMaterialFileName(char *Dest, uint32 DestSize, const char *ObjName)
   the reason scalable text needs signed distance fields instead.
 */
 internal loaded_font
-GameLoadFont(thread_context *Thread, game_memory *Memory, game_opengl_api *GL,
+GameLoadFont(thread_context *Thread, game_memory *Memory, renderer *Renderer,
              memory_arena *Arena, const char *FileName, real32 PixelHeight)
 {
+    game_opengl_api *GL = Renderer->GL;
     loaded_font Result = {};
     Result.LineHeight = PixelHeight;
 
@@ -252,7 +254,7 @@ GameLoadFont(thread_context *Thread, game_memory *Memory, game_opengl_api *GL,
 // BOTH name fields, because one material's diffuse map can be another
 // material's alpha mask, and uploading it twice would be silent waste.
 internal uint32
-GameLoadMaterialTexture(thread_context *Thread, game_memory *Memory, game_opengl_api *GL,
+GameLoadMaterialTexture(thread_context *Thread, game_memory *Memory, renderer *Renderer,
                         const char *ObjFileName, const char *MapName,
                         render_submesh *Submeshes, uint32 SubmeshCount)
 {
@@ -276,7 +278,7 @@ GameLoadMaterialTexture(thread_context *Thread, game_memory *Memory, game_opengl
     char TextureFileName[256];
     ObjMakeSiblingFileName(TextureFileName, sizeof(TextureFileName), ObjFileName, MapName);
 
-    return(GameLoadTexture(Thread, Memory, GL, TextureFileName, GL_REPEAT));
+    return(GameLoadTexture(Thread, Memory, Renderer, TextureFileName, GL_REPEAT));
 }
 
 // Reads an OBJ, de-duplicates it into a vertex/index pair, and hands both to
@@ -287,9 +289,10 @@ GameLoadMaterialTexture(thread_context *Thread, game_memory *Memory, game_opengl
 // and none of it survives this call - glBufferData copies the vertices, so the
 // CPU-side arrays are dead the moment they reach the GPU.
 internal render_model
-GameLoadModel(thread_context *Thread, game_memory *Memory, game_opengl_api *GL,
+GameLoadModel(thread_context *Thread, game_memory *Memory, renderer *Renderer,
               memory_arena *Arena, const char *FileName)
 {
+    game_opengl_api *GL = Renderer->GL;
     render_model Result = {};
 
     ResetArena(Arena);
@@ -405,7 +408,7 @@ GameLoadModel(thread_context *Thread, game_memory *Memory, game_opengl_api *GL,
         if(Submesh->Material.HasDiffuseMap)
         {
             Submesh->DiffuseTexture =
-                GameLoadMaterialTexture(Thread, Memory, GL, FileName,
+                GameLoadMaterialTexture(Thread, Memory, Renderer, FileName,
                                         Submesh->Material.DiffuseMapName,
                                         Result.Submeshes, Result.SubmeshCount - 1);
         }
@@ -413,7 +416,7 @@ GameLoadModel(thread_context *Thread, game_memory *Memory, game_opengl_api *GL,
         if(Submesh->Material.HasAlphaMap)
         {
             Submesh->AlphaTexture =
-                GameLoadMaterialTexture(Thread, Memory, GL, FileName,
+                GameLoadMaterialTexture(Thread, Memory, Renderer, FileName,
                                         Submesh->Material.AlphaMapName,
                                         Result.Submeshes, Result.SubmeshCount - 1);
         }
@@ -421,25 +424,6 @@ GameLoadModel(thread_context *Thread, game_memory *Memory, game_opengl_api *GL,
 
     // Safe now - every name has been resolved into a material by value.
     Memory->DEBUGPlatformFreeFileMemory(Thread, File.Contents);
-
-    return(Result);
-}
-
-// Makes the fallback texture: a single white pixel.
-internal uint32
-GameCreateWhiteTexture(game_opengl_api *GL)
-{
-    uint32 Result = 0;
-    uint8 White[4] = {255, 255, 255, 255};
-
-    GL->glGenTextures(1, &Result);
-    GL->glBindTexture(GL_TEXTURE_2D, Result);
-    GL->glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
-    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    GL->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, White);
 
     return(Result);
 }

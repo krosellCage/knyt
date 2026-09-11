@@ -11,19 +11,141 @@
   Everything here is per frame.  Loading assets is handmade_assets.h.
 */
 
-// Everything a GL backend needs to execute a command, gathered so it is one
-// parameter rather than three.
-//
-// NOTE(yigit): Programs is indexed by render_program, NOT by the raw
-// ShaderProgram array.  The mapping from role to handle lives here on purpose:
-// a GLuint in the command stream would be OpenGL leaking into a file that is
-// supposed to have none.
-struct opengl_backend
+/*
+  The renderer, as an object the game holds but never looks inside.
+
+  NOTE(yigit): game_state declares this as an incomplete type and stores only a
+  POINTER to it.  That is what keeps game_opengl_api out of handmade.h - the
+  game knows a renderer exists and can pass it around, and knows nothing about
+  what is in it.  A Vulkan backend defines the same name with entirely
+  different contents and the game layer does not change.
+
+  It owns the shader programs, which is why the hot-reload loop moved here out
+  of handmade_shader.h.  A program handle is a backend resource; game_state has
+  no business holding one.
+*/
+struct renderer
 {
     game_opengl_api *GL;
+
+    // Indexed by render_program, NOT by the raw file table.  The mapping from
+    // role to handle lives on this side on purpose: a GLuint in the command
+    // stream would be OpenGL leaking into a file that is supposed to have none.
     uint32 Programs[RenderProgram_Count];
+    shader_watch Watches[RenderProgram_Count];
+
+    // One white pixel, for materials that name no texture.
     uint32 WhiteTexture;
 };
+
+// Makes the fallback texture: a single white pixel.
+internal uint32
+RendererCreateWhiteTexture(game_opengl_api *GL)
+{
+    uint32 Result = 0;
+    uint8 White[4] = {255, 255, 255, 255};
+
+    GL->glGenTextures(1, &Result);
+    GL->glBindTexture(GL_TEXTURE_2D, Result);
+    GL->glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    GL->glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, White);
+
+    return(Result);
+}
+
+/*
+  Allocates and sets up the backend.  Called once.
+
+  NOTE(yigit): It digs game_opengl_api out of game_memory itself rather than
+  being handed one.  That is the point: after this, no line in handmade.cpp
+  names an OpenGL type.
+*/
+internal renderer *
+RendererInitialize(game_memory *Memory, memory_arena *Arena)
+{
+    renderer *Result = PushStruct(Arena, renderer);
+    *Result = {};
+
+    Result->GL = &Memory->OpenGL;
+
+    // NOTE(yigit): Required now that there is solid geometry.  Without it the
+    // back faces draw over the front ones in whatever order they happen to be
+    // listed, and objects look turned inside out.  This used to be the last
+    // glEnable in the game layer.
+    Result->GL->glEnable(GL_DEPTH_TEST);
+
+    Result->WhiteTexture = RendererCreateWhiteTexture(Result->GL);
+
+    return(Result);
+}
+
+/*
+  Polls every shader file and rebuilds any program whose sources changed.
+
+  This also performs the very first load: a renderer starts zeroed, so the
+  stored write times are 0, which never matches a real file and triggers a
+  build on frame one.  One code path, no special case for startup.
+*/
+internal void
+RendererUpdateShaders(renderer *Renderer, thread_context *Thread, game_memory *Memory)
+{
+    // The file table and the program array are indexed together, so they have
+    // to be the same length - and that length is RenderProgram_Count, which is
+    // what ties a file to the role it fills.
+    Assert(ArrayCount(GlobalShaderFiles) == RenderProgram_Count);
+
+    game_opengl_api *GL = Renderer->GL;
+
+    for(uint32 Index = 0;
+        Index < RenderProgram_Count;
+        ++Index)
+    {
+        shader_source_files Files = GlobalShaderFiles[Index];
+        shader_watch *Watch = Renderer->Watches + Index;
+
+        uint64 VertWriteTime = Memory->DEBUGPlatformGetFileWriteTime(Thread, Files.VertFileName);
+        uint64 FragWriteTime = Memory->DEBUGPlatformGetFileWriteTime(Thread, Files.FragFileName);
+
+        if((VertWriteTime == Watch->VertWriteTime) &&
+           (FragWriteTime == Watch->FragWriteTime))
+        {
+            continue;
+        }
+
+        // NOTE(yigit): Record the new times even when the build fails, so a
+        // broken shader is reported once instead of every single frame.
+        // Saving the file again moves the timestamp and we try once more.
+        Watch->VertWriteTime = VertWriteTime;
+        Watch->FragWriteTime = FragWriteTime;
+
+        uint32 NewProgram = GameBuildShaderProgram(Thread, Memory, GL,
+                                                   Files.VertFileName, Files.FragFileName);
+        if(NewProgram)
+        {
+            // NOTE(yigit): Safe on the first load - glDeleteProgram ignores 0.
+            GL->glDeleteProgram(Renderer->Programs[Index]);
+            Renderer->Programs[Index] = NewProgram;
+
+            Memory->DEBUGPlatformLog(Thread, "SHADER RELOADED: ");
+            Memory->DEBUGPlatformLog(Thread, Files.FragFileName);
+            Memory->DEBUGPlatformLog(Thread, "\n");
+        }
+        else
+        {
+            Memory->DEBUGPlatformLog(Thread, "SHADER RELOAD FAILED, keeping previous program: ");
+            Memory->DEBUGPlatformLog(Thread, Files.FragFileName);
+            Memory->DEBUGPlatformLog(Thread, "\n");
+
+            // NOTE(yigit): Nothing to fall back on means this was the first
+            // load, so the data files are genuinely missing or broken.
+            Assert(Renderer->Programs[Index]);
+        }
+    }
+}
 
 
 // Draws one loaded model, a submesh at a time, setting that submesh's material
@@ -226,9 +348,9 @@ SetLampUniforms(game_opengl_api *GL, uint32 Program, render_command_setup *Setup
   recognise be skipped rather than desynchronising the whole stream.
 */
 internal void
-RenderBufferExecute(opengl_backend *Backend, render_buffer *Buffer)
+RenderBufferExecute(renderer *Renderer, render_buffer *Buffer)
 {
-    game_opengl_api *GL = Backend->GL;
+    game_opengl_api *GL = Renderer->GL;
 
     // Uniforms shared by a whole frame arrive in a Setup command, and the draws
     // that follow need them.  Remembered rather than re-read, so a draw never
@@ -258,17 +380,17 @@ RenderBufferExecute(opengl_backend *Backend, render_buffer *Buffer)
 
                 // Both programs are told, and neither can be told lazily -
                 // uniforms belong to a program, not to the context.
-                SetLitUniforms(GL, Backend->Programs[RenderProgram_Lit], Setup);
-                SetLampUniforms(GL, Backend->Programs[RenderProgram_Lamp], Setup);
+                SetLitUniforms(GL, Renderer->Programs[RenderProgram_Lit], Setup);
+                SetLampUniforms(GL, Renderer->Programs[RenderProgram_Lamp], Setup);
             } break;
 
             case RenderCommand_DrawModel:
             {
                 render_command_draw_model *Command = (render_command_draw_model *)Header;
 
-                uint32 Program = Backend->Programs[Command->Program];
+                uint32 Program = Renderer->Programs[Command->Program];
                 GameDrawModel(GL, Program, Command->Model, Command->Transform,
-                              Backend->WhiteTexture);
+                              Renderer->WhiteTexture);
             } break;
 
             case RenderCommand_DrawOverlay:
@@ -280,9 +402,9 @@ RenderBufferExecute(opengl_backend *Backend, render_buffer *Buffer)
                 // sit in the game layer; it belongs on this side of the seam,
                 // because which state a 2D pass requires is an api question.
                 OverlayFlush(Command->Overlay, GL,
-                             Backend->Programs[RenderProgram_Overlay],
+                             Renderer->Programs[RenderProgram_Overlay],
                              Command->Projection,
-                             Command->Font ? Command->Font->Texture : Backend->WhiteTexture,
+                             Command->Font ? Command->Font->Texture : Renderer->WhiteTexture,
                              Command->Color);
             } break;
         }

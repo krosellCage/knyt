@@ -159,62 +159,10 @@ GameBuildShaderProgram(thread_context *Thread, game_memory *Memory, game_opengl_
     return(Result);
 }
 
-// Polls every shader file and rebuilds any program whose sources changed.
-// This also performs the very first load: game_state starts zeroed, so the
-// stored write times are 0, which never matches a real file and triggers a
-// build on frame one.  One code path, no special case for startup.
-internal void
-GameUpdateShaderPrograms(thread_context *Thread, game_memory *Memory,
-                         game_state *State, game_opengl_api *GL)
-{
-    Assert(ArrayCount(GlobalShaderFiles) == ArrayCount(State->ShaderProgram));
-
-    for(int Index = 0;
-        Index < ArrayCount(GlobalShaderFiles);
-        ++Index)
-    {
-        shader_source_files Files = GlobalShaderFiles[Index];
-        shader_watch *Watch = &State->ShaderWatches[Index];
-
-        uint64 VertWriteTime = Memory->DEBUGPlatformGetFileWriteTime(Thread, Files.VertFileName);
-        uint64 FragWriteTime = Memory->DEBUGPlatformGetFileWriteTime(Thread, Files.FragFileName);
-
-        if((VertWriteTime == Watch->VertWriteTime) &&
-           (FragWriteTime == Watch->FragWriteTime))
-        {
-            continue;
-        }
-
-        // NOTE(yigit): Record the new times even when the build fails, so a
-        // broken shader is reported once instead of every single frame.
-        // Saving the file again moves the timestamp and we try once more.
-        Watch->VertWriteTime = VertWriteTime;
-        Watch->FragWriteTime = FragWriteTime;
-
-        uint32 NewProgram = GameBuildShaderProgram(Thread, Memory, GL,
-                                                   Files.VertFileName, Files.FragFileName);
-        if(NewProgram)
-        {
-            // NOTE(yigit): Safe on the first load - glDeleteProgram ignores 0.
-            GL->glDeleteProgram(State->ShaderProgram[Index]);
-            State->ShaderProgram[Index] = NewProgram;
-
-            Memory->DEBUGPlatformLog(Thread, "SHADER RELOADED: ");
-            Memory->DEBUGPlatformLog(Thread, Files.FragFileName);
-            Memory->DEBUGPlatformLog(Thread, "\n");
-        }
-        else
-        {
-            Memory->DEBUGPlatformLog(Thread, "SHADER RELOAD FAILED, keeping previous program: ");
-            Memory->DEBUGPlatformLog(Thread, Files.FragFileName);
-            Memory->DEBUGPlatformLog(Thread, "\n");
-
-            // NOTE(yigit): Nothing to fall back on means this was the first
-            // load, so the data files are genuinely missing or broken.
-            Assert(State->ShaderProgram[Index]);
-        }
-    }
-}
+// NOTE(yigit): The hot-reload loop used to live here.  It moved to
+// handmade_render.h when the renderer became an object that owns its own
+// programs - polling files and swapping program handles is backend work, and
+// this file is now only about compiling, linking and setting uniforms.
 
 // Uniform setters
 

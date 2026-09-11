@@ -171,6 +171,9 @@ struct render_model
 // design.
 #include "handmade_renderer.h"
 
+// NOTE(yigit): Declared, never defined here.  See the Renderer member below.
+struct renderer;
+
 struct game_state
 {
     real32 PlayerX;
@@ -185,10 +188,15 @@ struct game_state
     // wall clock would drift and break that determinism.
     real32 TimeSeconds;
 
-    // NOTE(yigit): 3D rendering handles — created once in GameUpdateAndRender when
-    // !Memory->IsInitialized, then reused every frame
-    uint32 ShaderProgram[3];    // lit, lamp, overlay
-    shader_watch ShaderWatches[3];
+    // NOTE(yigit): An INCOMPLETE type, and only ever a pointer.  The game knows
+    // a renderer exists and can hand it around; it does not know what is in
+    // one.  That is what keeps game_opengl_api out of this header, and what
+    // lets a Vulkan backend define the same name with entirely different
+    // contents without the game layer changing a line.
+    //
+    // Shader programs and their file watches used to sit here.  A program
+    // handle is a backend resource, so both moved inside.
+    renderer *Renderer;
 
     // NOTE(yigit): All geometry AND all textures are loaded from disk now.  The
     // hand-written cube vertex table that used to live in GameInitOpenGL is
@@ -197,11 +205,6 @@ struct game_state
     // fetches it.
     render_model Model;         // the subject of the scene
     render_model MarkerModel;   // a small cube drawn at each point light
-
-    // NOTE(yigit): One white pixel.  Materials with no map_Kd bind this, and
-    // white times Kd is Kd - so the shader never has to ask whether a texture
-    // exists.  Cheaper than a branch, and it keeps one code path.
-    uint32 WhiteTexture;
 
     // 2D screen-space pass - debug text and anything else that sits on top of
     // the scene.  Refilled from empty every frame.
