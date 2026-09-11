@@ -10,14 +10,16 @@
       that needs real blending.
     - Depth matters there.  An overlay sits on top of everything by definition.
 
-  So it gets its own VAO, its own buffer, its own shader and its own state.
-  Quads accumulate into a CPU-side array during the frame and go to the GPU in
-  one upload at the end.
+  So it gets its own buffer, its own shader and its own state.
+
+  NOTE(yigit): There is no graphics api in this file.  Quads accumulate into a
+  CPU-side array during the frame; uploading it and drawing it is the backend's
+  job, in handmade_render_opengl.h.
 */
 
-// 6 vertices per quad - two triangles, no index buffer.  An EBO would save two
-// vertices in four, which at 16 bytes each is not worth a second buffer to
-// upload and keep in sync every frame.
+// 6 vertices per quad - two triangles, and no index buffer.  Indexing would
+// save two vertices in four, which at 16 bytes each is not worth a second
+// buffer to allocate, upload and keep in sync every frame.
 #define OVERLAY_MAX_QUADS 4096
 #define OVERLAY_MAX_VERTICES (6 * OVERLAY_MAX_QUADS)
 
@@ -62,8 +64,8 @@ struct loaded_font
 
 struct overlay
 {
-    uint32 VAO;
-    uint32 VBO;
+    // The GPU-side buffer, owned by the backend.  Opaque here.
+    overlay_buffer_handle Buffer;
 
     // NOTE(yigit): Lives in WorldArena, not on the stack and not re-allocated.
     // It is refilled from zero every frame, so it is scratch in use but
@@ -71,39 +73,14 @@ struct overlay
     overlay_vertex *Vertices;
     uint32 VertexCount;
 };
-
+// Hands out the CPU-side array.  The GPU-side buffer is the backend's job -
+// RendererCreateOverlayBuffer fills in the handle.
 internal void
-OverlayInitialize(overlay *Overlay, game_opengl_api *GL, memory_arena *Arena)
+OverlayAllocate(overlay *Overlay, memory_arena *Arena)
 {
     Overlay->Vertices = PushArray(Arena, OVERLAY_MAX_VERTICES, overlay_vertex);
     Overlay->VertexCount = 0;
-
-    GL->glGenVertexArrays(1, &Overlay->VAO);
-    GL->glGenBuffers(1, &Overlay->VBO);
-
-    GL->glBindVertexArray(Overlay->VAO);
-    GL->glBindBuffer(GL_ARRAY_BUFFER, Overlay->VBO);
-
-    // NOTE(yigit): Allocated at full size ONCE with a null pointer, so the
-    // driver reserves the storage now and glBufferSubData below only ever
-    // writes into it.  GL_DYNAMIC_DRAW is the hint that this will be rewritten
-    // often - calling glBufferData every frame instead would ask the driver to
-    // reallocate every frame, which is the classic way to make a dynamic
-    // buffer slow.
-    GL->glBufferData(GL_ARRAY_BUFFER, OVERLAY_MAX_VERTICES * sizeof(overlay_vertex),
-                     0, GL_DYNAMIC_DRAW);
-
-    GL->glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(overlay_vertex),
-                              (void *)0);
-    GL->glEnableVertexAttribArray(0);
-
-    GL->glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(overlay_vertex),
-                              (void *)(2 * sizeof(real32)));
-    GL->glEnableVertexAttribArray(1);
-
-    GL->glBindVertexArray(0);
 }
-
 // Call once at the top of each frame, before anything pushes.
 inline void
 OverlayReset(overlay *Overlay)
@@ -184,61 +161,6 @@ OverlayPushText(overlay *Overlay, loaded_font *Font, real32 X, real32 Y,
     }
 
     return(PenX);
-}
-
-// Uploads everything pushed this frame and draws it in one call.
-//
-// NOTE(yigit): State is saved and restored around the draw by hand, because
-// there is no render state system yet - the 3D pass that runs next frame would
-// otherwise inherit blending and a disabled depth test and quietly break.
-// This is exactly the kind of bookkeeping a push buffer exists to remove.
-internal void
-OverlayFlush(overlay *Overlay, game_opengl_api *GL, uint32 Program,
-             mat4 Projection, uint32 Texture, vec3 Color)
-{
-    if(!Overlay->VertexCount)
-    {
-        return;
-    }
-
-    GL->glBindBuffer(GL_ARRAY_BUFFER, Overlay->VBO);
-    GL->glBufferSubData(GL_ARRAY_BUFFER, 0,
-                        Overlay->VertexCount * sizeof(overlay_vertex),
-                        Overlay->Vertices);
-
-    GL->glUseProgram(Program);
-
-    // NOTE(yigit): Straight to GL rather than through handmade_shader.h's
-    // setters.  That header includes handmade.h, and handmade.h includes this
-    // one so game_state can hold an overlay by value - using the helpers would
-    // close the circle.  These are one-liners anyway.
-    GL->glUniformMatrix4fv(GL->glGetUniformLocation(Program, "projection"),
-                           1, GL_FALSE, Projection.E);
-    GL->glUniform3f(GL->glGetUniformLocation(Program, "color"),
-                    Color.X, Color.Y, Color.Z);
-    GL->glUniform1i(GL->glGetUniformLocation(Program, "atlas"), 0);
-
-    GL->glActiveTexture(GL_TEXTURE0);
-    GL->glBindTexture(GL_TEXTURE_2D, Texture);
-
-    // Standard "over": the incoming fragment contributes its own alpha, and
-    // what is already on screen contributes the rest.
-    GL->glEnable(GL_BLEND);
-    GL->glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-
-    // NOTE(yigit): The depth TEST is off so the overlay always wins, and the
-    // depth WRITE is off so it does not leave a mark that occludes the scene
-    // on the next frame.  Turning off only the test would still write.
-    GL->glDisable(GL_DEPTH_TEST);
-    GL->glDepthMask(GL_FALSE);
-
-    GL->glBindVertexArray(Overlay->VAO);
-    GL->glDrawArrays(GL_TRIANGLES, 0, (int32)Overlay->VertexCount);
-    GL->glBindVertexArray(0);
-
-    GL->glDepthMask(GL_TRUE);
-    GL->glEnable(GL_DEPTH_TEST);
-    GL->glDisable(GL_BLEND);
 }
 
 #define HANDMADE_OVERLAY_H

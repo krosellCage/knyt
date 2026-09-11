@@ -34,6 +34,12 @@
 #define Assert(Expression)
 #endif
 
+// For a branch that should be unreachable.  A switch that silently ignores a
+// case it does not know is indistinguishable from one that handled it and drew
+// nothing, which is the worst kind of bug to chase.
+#define InvalidCodePath Assert(!"InvalidCodePath")
+#define InvalidDefaultCase default: {InvalidCodePath;} break
+
 #define Kilobytes(Value) ((Value)*1024LL)
 #define Megabytes(Value) (Kilobytes(Value)*1024LL)
 #define Gigabytes(Value) (Megabytes(Value)*1024LL)
@@ -85,6 +91,7 @@ struct shader_watch
 
 #define PushStruct(Arena, type) (type *)PushSize_(Arena, sizeof(type))
 #define PushArray(Arena, Count, type) (type *)PushSize_(Arena, (Count)*sizeof(type))
+
 internal void *
 PushSize_(memory_arena *Arena, memory_index Size)
 {
@@ -132,16 +139,23 @@ ResetArena(memory_arena *Arena)
   wanted, and you cannot hand one to a graphics api by mistake - the compiler
   stops all three.
 
-  This replaces render_model naming the backend's own buffer objects directly.
-  Those are not the same things, or even the same NUMBER of things, from one
-  api to the next - so spelling them out in a header the game layer reads meant
-  the game layer was quietly shaped by whichever one happened to be underneath.
+  A backend's own buffer objects are not the same things, or even the same
+  NUMBER of things, from one api to the next.  Spelling them out in a header
+  the game layer reads would shape the game layer around whichever one happens
+  to be underneath, so they do not appear here at all.
 */
-struct mesh_handle    { uint32 Value; };
-struct texture_handle { uint32 Value; };
+struct mesh_handle           { uint32 Value; };
+struct texture_handle        { uint32 Value; };
 
-inline bool32 IsValidHandle(mesh_handle Handle)    { return(Handle.Value != 0); }
-inline bool32 IsValidHandle(texture_handle Handle) { return(Handle.Value != 0); }
+// NOTE(yigit): Separate from mesh_handle on purpose.  A mesh is static
+// geometry with an index buffer, uploaded once.  This names a DYNAMIC vertex
+// buffer with no indices, rewritten every frame.  One type for both would mean
+// the backend guessing which of the two it was holding.
+struct overlay_buffer_handle { uint32 Value; };
+
+inline bool32 IsValidHandle(mesh_handle Handle)           { return(Handle.Value != 0); }
+inline bool32 IsValidHandle(texture_handle Handle)        { return(Handle.Value != 0); }
+inline bool32 IsValidHandle(overlay_buffer_handle Handle) { return(Handle.Value != 0); }
 
 // A run of the index buffer sharing one material - a copy of obj_submesh that
 // survives the load, since the OBJ side of it lives in scratch memory.
@@ -222,15 +236,13 @@ struct game_state
     // and what lets a different backend define the same name with entirely
     // different contents without the game layer changing a line.
     //
-    // Shader programs and their file watches used to sit here.  A program
-    // handle is a backend resource, so both moved inside.
+    // Shader programs and their file watches live inside it, not out here - a
+    // program handle is a backend resource.
     renderer *Renderer;
 
-    // NOTE(yigit): All geometry AND all textures are loaded from disk now.  The
-    // hand-written cube vertex table that used to live in GameInitScene is
-    // gone, so are the ten hardcoded container positions, and so is the fixed
-    // container texture pair - a material names its own texture and the loader
-    // fetches it.
+    // NOTE(yigit): All geometry and all textures come off disk.  A material
+    // names its own texture and the loader fetches it, so nothing here is a
+    // fixed list of anything.
     render_model Model;         // the subject of the scene
     render_model MarkerModel;   // a small cube drawn at each point light
 
@@ -257,11 +269,6 @@ struct game_state
     // far more than WorldArena holds - and none of it outlives the
     // glBufferData call that copies the result to the GPU.
     memory_arena TransientArena;
-
-    // NOTE(yigit): Two cached uniform locations used to live here.  They are
-    // gone because a location only survives as long as the linked program, and
-    // shader hot reload relinks on every save - so anything parked in
-    // PermanentStorage goes stale silently.  GameDrawModel caches per FRAME.
 
     // NOTE(yigit): By value, not a pointer - it lives in PermanentStorage, so
     // it survives DLL reloads and is captured by the input recording.

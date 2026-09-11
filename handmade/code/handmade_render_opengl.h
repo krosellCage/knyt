@@ -24,10 +24,71 @@
   what is in it.  A Vulkan backend defines the same name with entirely
   different contents and the game layer does not change.
 
-  It owns the shader programs, which is why the hot-reload loop moved here out
-  of handmade_shader.h.  A program handle is a backend resource; game_state has
-  no business holding one.
+  It owns the shader programs, which is why the hot-reload loop lives here
+  rather than in handmade_shader.h.  Polling files and swapping program handles
+  is backend work.
 */
+/*
+  Every uniform location the lit program has, looked up once per link.
+
+  NOTE(yigit): Locations were looked up by NAME on every write, which for the
+  point lights meant an snprintf plus a driver-side string hash, seven times
+  per light per frame - forty-three lookups a frame for uniforms whose
+  addresses had not changed since startup.
+
+  They were not cached because a location belongs to one linked program, and
+  shader hot reload relinks on every save: a stale location is silently ignored
+  rather than reported, so the failure is "my edit did nothing" with no error
+  anywhere.  Generation is the answer to that.  RendererUpdateShaders bumps a
+  counter whenever ANY program relinks, and this refreshes itself when the
+  counter it saw last no longer matches.
+
+  Deliberately one counter for all programs rather than one each.  Relinks
+  happen when a human saves a file, so re-looking-up the lit program because
+  the lamp shader changed costs nothing anyone can measure, and one number is
+  much harder to get wrong than three.
+*/
+struct point_light_locations
+{
+    int32 Position;
+    int32 Constant;
+    int32 Linear;
+    int32 Quadratic;
+    int32 Ambient;
+    int32 Diffuse;
+    int32 Specular;
+};
+
+struct lit_program_locations
+{
+    // 0 means "never looked up".  RendererUpdateShaders starts the renderer's
+    // generation at 1, so the first frame always refreshes.
+    uint32 Generation;
+
+    int32 View;
+    int32 Projection;
+
+    int32 DirDirection;
+    int32 DirAmbient;
+    int32 DirDiffuse;
+    int32 DirSpecular;
+
+    int32 SpotAmbient;
+    int32 SpotDiffuse;
+    int32 SpotSpecular;
+    int32 SpotConstant;
+    int32 SpotLinear;
+    int32 SpotQuadratic;
+    int32 SpotCutOff;
+    int32 SpotOuterCutOff;
+
+    int32 MaterialDiffuse;
+    int32 MaterialSpecular;
+    int32 MaterialAlphaMask;
+
+    point_light_locations PointLights[4];
+};
+
 // What one mesh is, in OpenGL terms.  Nothing outside this file knows these
 // three numbers exist - a mesh_handle is an index into the table below.
 struct opengl_mesh
@@ -37,8 +98,27 @@ struct opengl_mesh
     uint32 EBO;
 };
 
-#define RENDERER_MAX_MESHES   64
-#define RENDERER_MAX_TEXTURES 256
+// The 2D pass.  No EBO - the overlay writes six vertices per quad rather than
+// four plus indices.
+struct opengl_overlay_buffer
+{
+    uint32 VAO;
+    uint32 VBO;
+};
+
+// Three uniforms, but cached on the same generation as the lit program: having
+// one cached and the other not is more confusing than either choice alone.
+struct overlay_program_locations
+{
+    uint32 Generation;
+    int32 Projection;
+    int32 Color;
+    int32 Atlas;
+};
+
+#define RENDERER_MAX_MESHES           64
+#define RENDERER_MAX_TEXTURES         256
+#define RENDERER_MAX_OVERLAY_BUFFERS  4
 
 struct renderer
 {
@@ -49,6 +129,13 @@ struct renderer
     // stream would be OpenGL leaking into a file that is supposed to have none.
     uint32 Programs[RenderProgram_Count];
     shader_watch Watches[RenderProgram_Count];
+
+    // Bumped whenever any program relinks.  Anything caching a uniform location
+    // compares against this and refreshes when it differs - see
+    // lit_program_locations.
+    uint32 ShaderGeneration;
+    lit_program_locations LitLocations;
+    overlay_program_locations OverlayLocations;
 
     /*
       NOTE(yigit): The resource tables.  A mesh_handle or texture_handle is an
@@ -65,6 +152,9 @@ struct renderer
 
     uint32 Textures[RENDERER_MAX_TEXTURES];
     uint32 TextureCount;
+
+    opengl_overlay_buffer OverlayBuffers[RENDERER_MAX_OVERLAY_BUFFERS];
+    uint32 OverlayBufferCount;
 
     // One white pixel, for materials that name no texture.
     texture_handle WhiteTexture;
@@ -86,6 +176,19 @@ RendererGetMesh(renderer *Renderer, mesh_handle Handle)
     return(Result);
 }
 
+internal opengl_overlay_buffer *
+RendererGetOverlayBuffer(renderer *Renderer, overlay_buffer_handle Handle)
+{
+    opengl_overlay_buffer *Result = 0;
+
+    if(Handle.Value && (Handle.Value <= Renderer->OverlayBufferCount))
+    {
+        Result = Renderer->OverlayBuffers + (Handle.Value - 1);
+    }
+
+    return(Result);
+}
+
 internal uint32
 RendererGetTexture(renderer *Renderer, texture_handle Handle)
 {
@@ -102,12 +205,10 @@ RendererGetTexture(renderer *Renderer, texture_handle Handle)
 /*
   Hands a block of CPU pixels to the GPU and returns a handle to it.
 
-  NOTE(yigit): This is the ONLY place a texture reaches OpenGL.  Three callers
-  used to repeat these eight calls between them - the image loader, the font
-  baker, and the white-pixel fallback - each with its own slightly different
-  set of parameters.  Pulling them together is the third-use rule firing, and
-  it is also what lets those three become api-agnostic: they now describe what
-  they want and this decides how to express it.
+  NOTE(yigit): The ONLY place a texture reaches OpenGL.  Its three callers - the
+  image loader, the font baker and the white-pixel fallback - describe what they
+  want and this decides how to express it, which is what keeps all three free of
+  any graphics api.
 
   ChannelCount is the real one, not an assumption.  Sponza ships greyscale
   alpha masks at one byte per pixel; treating anything non-RGBA as three bytes
@@ -269,9 +370,12 @@ RendererInitialize(game_memory *Memory, memory_arena *Arena)
 
     // NOTE(yigit): Required now that there is solid geometry.  Without it the
     // back faces draw over the front ones in whatever order they happen to be
-    // listed, and objects look turned inside out.  This used to be the last
-    // glEnable in the game layer.
+    // listed, and objects look turned inside out.
     Result->GL->glEnable(GL_DEPTH_TEST);
+
+    // NOTE(yigit): Starts at 1, not 0.  A cache that has never looked anything
+    // up holds generation 0, so the first frame always refreshes.
+    Result->ShaderGeneration = 1;
 
     Result->WhiteTexture = RendererCreateWhiteTexture(Result);
 
@@ -324,6 +428,13 @@ RendererUpdateShaders(renderer *Renderer, thread_context *Thread, game_memory *M
             // NOTE(yigit): Safe on the first load - glDeleteProgram ignores 0.
             GL->glDeleteProgram(Renderer->Programs[Index]);
             Renderer->Programs[Index] = NewProgram;
+
+            // NOTE(yigit): Every cached uniform location in the renderer names
+            // a program object that has just been deleted.  Bumping this is
+            // what makes them refresh - without it a shader edit would appear
+            // to do nothing, because writes to a stale location are ignored
+            // silently rather than reported.
+            ++Renderer->ShaderGeneration;
 
             Memory->DEBUGPlatformLog(Thread, "SHADER RELOADED: ");
             Memory->DEBUGPlatformLog(Thread, Files.FragFileName);
@@ -422,108 +533,159 @@ GameDrawModel(renderer *Renderer, uint32 Program, render_model *Model,
     }
 }
 
-// Book ch. 17.3 - the uniform names here are "pointLights[2].quadratic" and
-// friends.  The book builds them with std::string concatenation; with no
-// std::string in this layer they are formatted into a scratch buffer instead.
-//
-// NOTE(yigit): A local buffer is safe because glGetUniformLocation copies the
-// name it is handed - nothing keeps a pointer to it after the call returns.
+/*
+  Looks up every lit-program uniform location, but only when the shader
+  generation has moved since the last time.
+
+  NOTE(yigit): This is the ONLY place the "pointLights[2].quadratic" names are
+  built, and it runs once per relink rather than once per frame.  Everything
+  downstream writes to an int32 it already has.
+*/
 internal void
-SetPointLightUniforms(game_opengl_api *GL, uint32 Program, uint32 Index,
-                      render_point_light *Light, vec3 PositionView)
+RefreshLitLocations(renderer *Renderer)
 {
-    char Name[64];
+    lit_program_locations *L = &Renderer->LitLocations;
 
-    snprintf(Name, sizeof(Name), "pointLights[%u].position", Index);
-    SetUniformVec3(GL, Program, Name, PositionView);
+    if(L->Generation == Renderer->ShaderGeneration)
+    {
+        return;
+    }
 
-    snprintf(Name, sizeof(Name), "pointLights[%u].constant", Index);
-    SetUniformFloat(GL, Program, Name, Light->Constant);
-    snprintf(Name, sizeof(Name), "pointLights[%u].linear", Index);
-    SetUniformFloat(GL, Program, Name, Light->Linear);
-    snprintf(Name, sizeof(Name), "pointLights[%u].quadratic", Index);
-    SetUniformFloat(GL, Program, Name, Light->Quadratic);
+    game_opengl_api *GL = Renderer->GL;
+    uint32 Program = Renderer->Programs[RenderProgram_Lit];
 
-    snprintf(Name, sizeof(Name), "pointLights[%u].ambient", Index);
-    SetUniformVec3(GL, Program, Name, Light->Ambient);
-    snprintf(Name, sizeof(Name), "pointLights[%u].diffuse", Index);
-    SetUniformVec3(GL, Program, Name, Light->Diffuse);
-    snprintf(Name, sizeof(Name), "pointLights[%u].specular", Index);
-    SetUniformVec3(GL, Program, Name, Light->Specular);
+    L->View       = GetUniformLocation(GL, Program, "view");
+    L->Projection = GetUniformLocation(GL, Program, "projection");
+
+    L->DirDirection = GetUniformLocation(GL, Program, "dirLight.direction");
+    L->DirAmbient   = GetUniformLocation(GL, Program, "dirLight.ambient");
+    L->DirDiffuse   = GetUniformLocation(GL, Program, "dirLight.diffuse");
+    L->DirSpecular  = GetUniformLocation(GL, Program, "dirLight.specular");
+
+    L->SpotAmbient      = GetUniformLocation(GL, Program, "spotLight.ambient");
+    L->SpotDiffuse      = GetUniformLocation(GL, Program, "spotLight.diffuse");
+    L->SpotSpecular     = GetUniformLocation(GL, Program, "spotLight.specular");
+    L->SpotConstant     = GetUniformLocation(GL, Program, "spotLight.constant");
+    L->SpotLinear       = GetUniformLocation(GL, Program, "spotLight.linear");
+    L->SpotQuadratic    = GetUniformLocation(GL, Program, "spotLight.quadratic");
+    L->SpotCutOff       = GetUniformLocation(GL, Program, "spotLight.cutOff");
+    L->SpotOuterCutOff  = GetUniformLocation(GL, Program, "spotLight.outerCutOff");
+
+    L->MaterialDiffuse   = GetUniformLocation(GL, Program, "material.diffuse");
+    L->MaterialSpecular  = GetUniformLocation(GL, Program, "material.specular");
+    L->MaterialAlphaMask = GetUniformLocation(GL, Program, "material.alphaMask");
+
+    // The array names, built once and then never again.  A local buffer is safe
+    // because glGetUniformLocation copies the name it is handed.
+    for(uint32 Index = 0; Index < ArrayCount(L->PointLights); ++Index)
+    {
+        point_light_locations *P = L->PointLights + Index;
+        char Name[64];
+
+        snprintf(Name, sizeof(Name), "pointLights[%u].position", Index);
+        P->Position = GetUniformLocation(GL, Program, Name);
+        snprintf(Name, sizeof(Name), "pointLights[%u].constant", Index);
+        P->Constant = GetUniformLocation(GL, Program, Name);
+        snprintf(Name, sizeof(Name), "pointLights[%u].linear", Index);
+        P->Linear = GetUniformLocation(GL, Program, Name);
+        snprintf(Name, sizeof(Name), "pointLights[%u].quadratic", Index);
+        P->Quadratic = GetUniformLocation(GL, Program, Name);
+        snprintf(Name, sizeof(Name), "pointLights[%u].ambient", Index);
+        P->Ambient = GetUniformLocation(GL, Program, Name);
+        snprintf(Name, sizeof(Name), "pointLights[%u].diffuse", Index);
+        P->Diffuse = GetUniformLocation(GL, Program, Name);
+        snprintf(Name, sizeof(Name), "pointLights[%u].specular", Index);
+        P->Specular = GetUniformLocation(GL, Program, Name);
+    }
+
+    L->Generation = Renderer->ShaderGeneration;
 }
 
 /*
   Uploads one Setup command to the lit program.
 
-  NOTE(yigit): Every value now arrives in the command rather than from a global
-  in this file.  That is the actual change the push buffer makes - the scene
-  describes its lights, and the backend only decides how to express them.
+  Every value arrives in the command rather than from a global in this file:
+  the scene describes its lights, and this only decides how to express them.
 
-  The world-to-view conversion stays here on purpose: which space this renderer
-  lights in is a rendering decision, not something the scene should have to
-  know about.
+  The world-to-view conversion stays here on purpose.  Which space this
+  renderer lights in is a rendering decision, not something the scene should
+  have to know about.
 */
 internal void
-SetLitUniforms(game_opengl_api *GL, uint32 Program, render_command_setup *Setup)
+SetLitUniforms(renderer *Renderer, render_command_setup *Setup)
 {
-    SetUniformMat4(GL, Program, "view", Setup->View);
-    SetUniformMat4(GL, Program, "projection", Setup->Projection);
+    RefreshLitLocations(Renderer);
 
-    // NOTE(yigit): material.shininess, diffuseColor and specularColor are NOT
-    // set here - they vary per submesh, so GameDrawModel sets them immediately
-    // before each draw.
+    game_opengl_api *GL = Renderer->GL;
+    lit_program_locations *L = &Renderer->LitLocations;
+
+    // NOTE(yigit): The At-setters write to whatever program is BOUND, not to
+    // whichever one the location came from.  Nothing warns when those differ,
+    // so the bind has to happen here and not be assumed.
+    GL->glUseProgram(Renderer->Programs[RenderProgram_Lit]);
+
+    SetUniformMat4At(GL, L->View, Setup->View);
+    SetUniformMat4At(GL, L->Projection, Setup->Projection);
 
     // The SPOTLIGHT - the flashlight held at the camera.  It needs no position
     // or direction uniform: in view space the camera is the origin looking down
     // -Z, so the shader has both as constants.
-    SetUniformVec3(GL, Program, "spotLight.ambient",  Setup->SpotAmbient);
-    SetUniformVec3(GL, Program, "spotLight.diffuse",  Setup->SpotDiffuse);
-    SetUniformVec3(GL, Program, "spotLight.specular", Setup->SpotSpecular);
+    SetUniformVec3At(GL, L->SpotAmbient,  Setup->SpotAmbient);
+    SetUniformVec3At(GL, L->SpotDiffuse,  Setup->SpotDiffuse);
+    SetUniformVec3At(GL, L->SpotSpecular, Setup->SpotSpecular);
 
-    SetUniformFloat(GL, Program, "spotLight.constant",  Setup->SpotConstant);
-    SetUniformFloat(GL, Program, "spotLight.linear",    Setup->SpotLinear);
-    SetUniformFloat(GL, Program, "spotLight.quadratic", Setup->SpotQuadratic);
+    SetUniformFloatAt(GL, L->SpotConstant,  Setup->SpotConstant);
+    SetUniformFloatAt(GL, L->SpotLinear,    Setup->SpotLinear);
+    SetUniformFloatAt(GL, L->SpotQuadratic, Setup->SpotQuadratic);
 
     // Already cosines by the time they arrive - the scene converts from degrees
     // once, rather than this doing it every frame.
-    SetUniformFloat(GL, Program, "spotLight.cutOff",      Setup->SpotCutOff);
-    SetUniformFloat(GL, Program, "spotLight.outerCutOff", Setup->SpotOuterCutOff);
+    SetUniformFloatAt(GL, L->SpotCutOff,      Setup->SpotCutOff);
+    SetUniformFloatAt(GL, L->SpotOuterCutOff, Setup->SpotOuterCutOff);
 
-    // Book ch. 17.1 - the directional light.
-    //
     // NOTE(yigit): W is 0, not 1.  A direction has no location, so the view
     // matrix's translation column must not touch it.
     vec4 DirView = Setup->View * Vec4(Setup->DirLightDirectionWorld, 0.0f);
-    SetUniformVec3(GL, Program, "dirLight.direction",
-                   Vec3(DirView.X, DirView.Y, DirView.Z));
+    SetUniformVec3At(GL, L->DirDirection, Vec3(DirView.X, DirView.Y, DirView.Z));
 
-    SetUniformVec3(GL, Program, "dirLight.ambient",  Setup->DirAmbient);
-    SetUniformVec3(GL, Program, "dirLight.diffuse",  Setup->DirDiffuse);
-    SetUniformVec3(GL, Program, "dirLight.specular", Setup->DirSpecular);
+    SetUniformVec3At(GL, L->DirAmbient,  Setup->DirAmbient);
+    SetUniformVec3At(GL, L->DirDiffuse,  Setup->DirDiffuse);
+    SetUniformVec3At(GL, L->DirSpecular, Setup->DirSpecular);
 
-    // Book ch. 17.2 - the point lights.
-    //
     // NOTE(yigit): W is 1 here, not 0.  A position DOES get slid by the view
     // matrix's translation - that is the entire difference from the direction
     // above, and getting it backwards is the classic way to end up with lights
     // that drift as the camera moves.
-    for(uint32 LightIndex = 0;
-        LightIndex < Setup->PointLightCount;
-        ++LightIndex)
+    uint32 LightCount = Setup->PointLightCount;
+    if(LightCount > ArrayCount(L->PointLights))
     {
-        render_point_light *Light = Setup->PointLights + LightIndex;
-        vec4 PosView = Setup->View * Vec4(Light->PositionWorld, 1.0f);
-
-        SetPointLightUniforms(GL, Program, LightIndex, Light,
-                              Vec3(PosView.X, PosView.Y, PosView.Z));
+        LightCount = ArrayCount(L->PointLights);
     }
 
-    // Which texture unit each sampler reads from.  Constant, but uniforms do
-    // not survive a program rebuild, so they are re-sent every frame like the
+    for(uint32 Index = 0; Index < LightCount; ++Index)
+    {
+        render_point_light *Light = Setup->PointLights + Index;
+        point_light_locations *P = L->PointLights + Index;
+
+        vec4 PosView = Setup->View * Vec4(Light->PositionWorld, 1.0f);
+
+        SetUniformVec3At(GL, P->Position, Vec3(PosView.X, PosView.Y, PosView.Z));
+
+        SetUniformFloatAt(GL, P->Constant,  Light->Constant);
+        SetUniformFloatAt(GL, P->Linear,    Light->Linear);
+        SetUniformFloatAt(GL, P->Quadratic, Light->Quadratic);
+
+        SetUniformVec3At(GL, P->Ambient,  Light->Ambient);
+        SetUniformVec3At(GL, P->Diffuse,  Light->Diffuse);
+        SetUniformVec3At(GL, P->Specular, Light->Specular);
+    }
+
+    // Which texture unit each sampler reads from.  Constant, but a relink
+    // resets every uniform in the program, so they go up every frame with the
     // rest.
-    SetUniformInt(GL, Program, "material.diffuse", 0);
-    SetUniformInt(GL, Program, "material.specular", 1);
-    SetUniformInt(GL, Program, "material.alphaMask", 2);
+    SetUniformIntAt(GL, L->MaterialDiffuse, 0);
+    SetUniformIntAt(GL, L->MaterialSpecular, 1);
+    SetUniformIntAt(GL, L->MaterialAlphaMask, 2);
 }
 
 // NOTE(yigit): View and projection have to be set here as well as on the lit
@@ -541,6 +703,139 @@ SetLampUniforms(game_opengl_api *GL, uint32 Program, render_command_setup *Setup
 }
 
 /*
+  Creates the GPU-side buffer an overlay draws from.  The CPU-side array is the
+  caller's, handed out by OverlayAllocate.
+
+  NOTE(yigit): Allocated at full size ONCE with a null pointer, so the driver
+  reserves the storage now and the per-frame upload only ever writes into it.
+  GL_DYNAMIC_DRAW is the hint that this will be rewritten often - calling
+  glBufferData every frame instead would ask the driver to reallocate every
+  frame, which is the classic way to make a dynamic buffer slow.
+*/
+internal overlay_buffer_handle
+RendererCreateOverlayBuffer(renderer *Renderer)
+{
+    game_opengl_api *GL = Renderer->GL;
+    overlay_buffer_handle Result = {};
+
+    Assert(Renderer->OverlayBufferCount < RENDERER_MAX_OVERLAY_BUFFERS);
+    if(Renderer->OverlayBufferCount >= RENDERER_MAX_OVERLAY_BUFFERS)
+    {
+        return(Result);
+    }
+
+    opengl_overlay_buffer *Buffer = Renderer->OverlayBuffers + Renderer->OverlayBufferCount;
+
+    GL->glGenVertexArrays(1, &Buffer->VAO);
+    GL->glGenBuffers(1, &Buffer->VBO);
+
+    GL->glBindVertexArray(Buffer->VAO);
+    GL->glBindBuffer(GL_ARRAY_BUFFER, Buffer->VBO);
+
+    GL->glBufferData(GL_ARRAY_BUFFER, OVERLAY_MAX_VERTICES * sizeof(overlay_vertex),
+                     0, GL_DYNAMIC_DRAW);
+
+    // Two attributes, both vec2: position in pixels, then texture coordinate.
+    GL->glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(overlay_vertex),
+                              (void *)0);
+    GL->glEnableVertexAttribArray(0);
+
+    GL->glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(overlay_vertex),
+                              (void *)(2 * sizeof(real32)));
+    GL->glEnableVertexAttribArray(1);
+
+    GL->glBindVertexArray(0);
+
+    ++Renderer->OverlayBufferCount;
+    Result.Value = Renderer->OverlayBufferCount;
+
+    return(Result);
+}
+
+// Looks up the overlay program's uniform locations, once per relink.  Same
+// generation trick as RefreshLitLocations - three lookups rather than
+// forty-three, but caching only some of them would be the confusing option.
+internal void
+RefreshOverlayLocations(renderer *Renderer)
+{
+    overlay_program_locations *L = &Renderer->OverlayLocations;
+
+    if(L->Generation == Renderer->ShaderGeneration)
+    {
+        return;
+    }
+
+    game_opengl_api *GL = Renderer->GL;
+    uint32 Program = Renderer->Programs[RenderProgram_Overlay];
+
+    L->Projection = GetUniformLocation(GL, Program, "projection");
+    L->Color      = GetUniformLocation(GL, Program, "color");
+    L->Atlas      = GetUniformLocation(GL, Program, "atlas");
+
+    L->Generation = Renderer->ShaderGeneration;
+}
+
+/*
+  Uploads whatever the overlay accumulated this frame and draws it in one call.
+
+  NOTE(yigit): The blend and depth state is set and restored here by hand,
+  because there is no render state system yet - next frame's 3D pass would
+  otherwise inherit blending and a disabled depth test and quietly break.
+  Which state a 2D pass needs is an api question, which is why this lives on
+  this side of the seam rather than in handmade_overlay.h.
+*/
+internal void
+RendererDrawOverlay(renderer *Renderer, overlay *Overlay, mat4 Projection,
+                    texture_handle TextureHandle, vec3 Color)
+{
+    game_opengl_api *GL = Renderer->GL;
+
+    opengl_overlay_buffer *Buffer = RendererGetOverlayBuffer(Renderer, Overlay->Buffer);
+    if(!Buffer || !Overlay->VertexCount)
+    {
+        return;
+    }
+
+    RefreshOverlayLocations(Renderer);
+    overlay_program_locations *L = &Renderer->OverlayLocations;
+
+    GL->glBindBuffer(GL_ARRAY_BUFFER, Buffer->VBO);
+    GL->glBufferSubData(GL_ARRAY_BUFFER, 0,
+                        Overlay->VertexCount * sizeof(overlay_vertex),
+                        Overlay->Vertices);
+
+    GL->glUseProgram(Renderer->Programs[RenderProgram_Overlay]);
+
+    SetUniformMat4At(GL, L->Projection, Projection);
+    SetUniformVec3At(GL, L->Color, Color);
+    SetUniformIntAt(GL, L->Atlas, 0);
+
+    GL->glActiveTexture(GL_TEXTURE0);
+    GL->glBindTexture(GL_TEXTURE_2D, RendererGetTexture(Renderer, TextureHandle));
+
+    // Standard "over": the incoming fragment contributes its own alpha, and
+    // what is already on screen contributes the rest.  Needed rather than
+    // discard because a glyph edge is PARTIALLY covered, which discard cannot
+    // express.
+    GL->glEnable(GL_BLEND);
+    GL->glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+    // NOTE(yigit): The depth TEST is off so the overlay always wins, and the
+    // depth WRITE is off so it does not leave a mark that occludes the scene on
+    // the next frame.  Turning off only the test would still write.
+    GL->glDisable(GL_DEPTH_TEST);
+    GL->glDepthMask(GL_FALSE);
+
+    GL->glBindVertexArray(Buffer->VAO);
+    GL->glDrawArrays(GL_TRIANGLES, 0, (int32)Overlay->VertexCount);
+    GL->glBindVertexArray(0);
+
+    GL->glDepthMask(GL_TRUE);
+    GL->glEnable(GL_DEPTH_TEST);
+    GL->glDisable(GL_BLEND);
+}
+
+/*
   Walks the command buffer and executes it.  The entire backend is this one
   function plus the helpers above.
 
@@ -552,11 +847,6 @@ internal void
 RenderBufferExecute(renderer *Renderer, render_buffer *Buffer)
 {
     game_opengl_api *GL = Renderer->GL;
-
-    // Uniforms shared by a whole frame arrive in a Setup command, and the draws
-    // that follow need them.  Remembered rather than re-read, so a draw never
-    // has to search backwards through the buffer.
-    render_command_setup *Setup = 0;
 
     uint8 *At = Buffer->Base;
     uint8 *End = Buffer->Base + Buffer->Used;
@@ -577,11 +867,13 @@ RenderBufferExecute(renderer *Renderer, render_buffer *Buffer)
 
             case RenderCommand_Setup:
             {
-                Setup = (render_command_setup *)Header;
+                render_command_setup *Setup = (render_command_setup *)Header;
 
-                // Both programs are told, and neither can be told lazily -
-                // uniforms belong to a program, not to the context.
-                SetLitUniforms(GL, Renderer->Programs[RenderProgram_Lit], Setup);
+                // NOTE(yigit): Both programs are told here and now, and
+                // neither can be told lazily at the draw that needs it -
+                // uniforms belong to a program, not to the context, so there
+                // is nowhere to stash this until later.
+                SetLitUniforms(Renderer, Setup);
                 SetLampUniforms(GL, Renderer->Programs[RenderProgram_Lamp], Setup);
             } break;
 
@@ -597,18 +889,17 @@ RenderBufferExecute(renderer *Renderer, render_buffer *Buffer)
             {
                 render_command_draw_overlay *Command = (render_command_draw_overlay *)Header;
 
-                // NOTE(yigit): OverlayFlush owns the blend and depth state it
-                // needs, and restores it afterwards.  That bookkeeping used to
-                // sit in the game layer; it belongs on this side of the seam,
-                // because which state a 2D pass requires is an api question.
-                OverlayFlush(Command->Overlay, GL,
-                             Renderer->Programs[RenderProgram_Overlay],
-                             Command->Projection,
-                             RendererGetTexture(Renderer,
-                                                Command->Font ? Command->Font->Texture
-                                                              : Renderer->WhiteTexture),
-                             Command->Color);
+                RendererDrawOverlay(Renderer, Command->Overlay, Command->Projection,
+                                    Command->Font ? Command->Font->Texture
+                                                  : Renderer->WhiteTexture,
+                                    Command->Color);
             } break;
+
+            // NOTE(yigit): A command nothing handles is a bug, not something to
+            // walk past quietly.  Header->Size means the stream stays readable
+            // either way, which is exactly why the failure would otherwise be
+            // invisible.
+            InvalidDefaultCase;
         }
 
         At += Header->Size;

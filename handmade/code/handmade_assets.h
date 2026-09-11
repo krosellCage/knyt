@@ -1,14 +1,12 @@
 #if !defined(HANDMADE_ASSETS_H)
 /*
   NOTE(yigit): Everything that turns bytes on disk into something the GPU
-  holds - textures, fonts and models.  Split out of handmade.cpp when that file
-  passed 900 lines and asset loading was half of it.
+  holds - textures, fonts and models.
 
   Nothing here is called per frame.  All of it runs once, from GameInitScene.
 
-  The two stb implementations live here rather than in handmade.cpp because
-  this is the only code that uses them, and it keeps their 13000 lines out of
-  the file you actually read.
+  The two stb implementations live here because this is the only code that uses
+  them, which keeps their 13000 lines out of every other file.
 */
 
 #define STB_IMAGE_IMPLEMENTATION

@@ -168,6 +168,11 @@ struct render_command_draw_overlay
     vec3 Color;
 };
 
+// NOTE(yigit): 16 rather than 8, so a command struct could hold a __m128
+// without this having to change.  The waste is a few bytes per command on a
+// handful of commands a frame.
+#define RENDER_COMMAND_ALIGNMENT 16
+
 struct render_buffer
 {
     uint8 *Base;
@@ -178,7 +183,15 @@ struct render_buffer
 internal void
 RenderBufferInitialize(render_buffer *Buffer, memory_arena *Arena, memory_index Size)
 {
-    Buffer->Base = (uint8 *)PushSize_(Arena, Size);
+    // NOTE(yigit): Over-allocate and walk the base forward to an aligned
+    // address.  The arena hands out whatever offset it is at, which for a
+    // block sitting after game_state is any number at all - and the first
+    // command would then be misaligned before a single push happened.
+    uint8 *Block = (uint8 *)PushSize_(Arena, Size + RENDER_COMMAND_ALIGNMENT);
+    memory_index Misalignment = ((memory_index)Block) & (RENDER_COMMAND_ALIGNMENT - 1);
+    memory_index Adjust = Misalignment ? (RENDER_COMMAND_ALIGNMENT - Misalignment) : 0;
+
+    Buffer->Base = Block + Adjust;
     Buffer->Size = Size;
     Buffer->Used = 0;
 }
@@ -194,18 +207,36 @@ RenderBufferReset(render_buffer *Buffer)
 internal void *
 PushRenderCommand_(render_buffer *Buffer, render_command_type Type, uint32 Size)
 {
-    // Dropping the command is the right failure.  Growing mid-frame would mean
-    // moving a buffer that already holds commands pointing at their own sizes.
-    if((Buffer->Used + Size) > Buffer->Size)
+    /*
+      NOTE(yigit): The size is rounded UP so the next command starts aligned.
+
+      Every command today is built from 4-byte fields, so the cursor happens to
+      stay aligned on its own - which is exactly the problem.  Nothing enforces
+      it.  Put one double or one __m128 in a command struct and the command
+      AFTER it gets misaligned loads: a crash, or silently wrong data, nowhere
+      near the struct that caused it.
+    */
+    uint32 AlignedSize = (Size + (RENDER_COMMAND_ALIGNMENT - 1)) &
+                         ~(uint32)(RENDER_COMMAND_ALIGNMENT - 1);
+
+    // NOTE(yigit): Dropping is still the right thing to DO at runtime - growing
+    // mid-frame would move a buffer that already holds commands.  But a silent
+    // drop looks exactly like "the lamps stopped rendering" with no clue why,
+    // so a debug build stops here and says which frame overflowed.
+    Assert((Buffer->Used + AlignedSize) <= Buffer->Size);
+    if((Buffer->Used + AlignedSize) > Buffer->Size)
     {
         return(0);
     }
 
     render_command_header *Header = (render_command_header *)(Buffer->Base + Buffer->Used);
-    Buffer->Used += Size;
+    Buffer->Used += AlignedSize;
 
     Header->Type = Type;
-    Header->Size = Size;
+
+    // The ALIGNED size, not the struct size - this is what the walker steps by,
+    // so it has to match what was actually consumed.
+    Header->Size = AlignedSize;
 
     return(Header);
 }

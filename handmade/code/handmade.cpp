@@ -46,17 +46,18 @@ global_variable const vec3 GlobalPointLightPositions[] =
 internal void
 GameInitScene(thread_context *Thread, game_memory *Memory, game_state *State)
 {
-    // NOTE(yigit): Both meshes come off disk now.  The 36-vertex cube table
-    // that used to sit here - six faces written out by hand with their normals
-    // - is gone, and so are the ten hardcoded container positions.  Anything
-    // that wants a cube loads cube.obj.
+    // Every mesh in the scene comes off disk.  Anything that wants a cube loads
+    // cube.obj rather than carrying a vertex table.
     State->Model = GameLoadModel(Thread, Memory, State->Renderer, &State->TransientArena,
                                  "data\\sponza.obj");
 
     State->MarkerModel = GameLoadModel(Thread, Memory, State->Renderer, &State->TransientArena,
                                        "data\\cube.obj");
 
-    OverlayInitialize(&State->Overlay, State->Renderer->GL, &State->WorldArena);
+    // The CPU array is the game's; the GPU buffer behind the handle is the
+    // backend's.
+    OverlayAllocate(&State->Overlay, &State->WorldArena);
+    State->Overlay.Buffer = RendererCreateOverlayBuffer(State->Renderer);
 
     // TransientArena, not WorldArena - the atlas bitmap and stb's glyph table
     // are both dead once the texture is uploaded and the quads are copied out.
@@ -214,7 +215,7 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     {
         Setup->DirLightDirectionWorld = GlobalDirLightDirection;
         Setup->DirAmbient  = Vec3(0.05f, 0.05f, 0.05f);
-        Setup->DirDiffuse  = Vec3(0.40f, 0.40f, 0.40f);
+        Setup->DirDiffuse  = Vec3(1.0f, 0.55f, 0.2f);
         Setup->DirSpecular = Vec3(0.50f, 0.50f, 0.50f);
 
         Setup->PointLightCount = ArrayCount(GlobalPointLightPositions);
@@ -228,8 +229,8 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
 
             Light->PositionWorld = GlobalPointLightPositions[LightIndex];
             Light->Ambient  = Vec3(0.05f, 0.05f, 0.05f);
-            Light->Diffuse  = Vec3(0.80f, 0.80f, 0.80f);
-            Light->Specular = Vec3(1.00f, 1.00f, 1.00f);
+            Light->Diffuse = Vec3(0.50f, 0.50f, 0.50f);
+            Light->Specular = Vec3(0.50f, 0.50f, 0.50f);
 
             // Book ch. 16.2 - the table row for a range of about 50 units.
             Light->Constant  = 1.0f;
