@@ -80,7 +80,7 @@ live directly in the game's persistent memory block and survive a code reload.
 A RIFF/WAVE parser that walks the chunk list, widens mono to stereo, and streams
 into the platform's audio ring buffer with looping.
 
-**Lighting**
+**Lighting** — `handmade_render.h`
 
 Phong — ambient, diffuse and specular — computed in view space, with each light
 type as its own GLSL struct and its own function. Six lights are summed per
