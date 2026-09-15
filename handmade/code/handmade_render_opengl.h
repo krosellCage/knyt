@@ -158,6 +158,25 @@ struct renderer
 
     // One white pixel, for materials that name no texture.
     texture_handle WhiteTexture;
+
+    /*
+      NOTE(yigit): The last camera command seen this frame.  Splitting camera
+      and lighting into two commands means the lighting one no longer carries
+      the view matrix it needs to convert world-space lights into the space the
+      shaders light in - so the backend remembers it between the two.
+
+      That is state carried ACROSS commands, which the push buffer otherwise
+      avoids, and it is the price of the split.  It is also how every real
+      renderer works: a command stream is ordered, and later commands read the
+      state earlier ones set.
+
+      Starts as identity rather than zeroed, so lighting pushed with no camera
+      ahead of it lights in world space - visibly wrong, but still a picture.
+      A zeroed matrix would collapse every light onto the origin instead, which
+      looks like a shader bug.
+    */
+    mat4 CurrentView;
+    mat4 CurrentProjection;
 };
 
 // Turning a handle back into the thing it names.  Both return a zeroed result
@@ -376,6 +395,10 @@ RendererInitialize(game_memory *Memory, memory_arena *Arena)
     // NOTE(yigit): Starts at 1, not 0.  A cache that has never looked anything
     // up holds generation 0, so the first frame always refreshes.
     Result->ShaderGeneration = 1;
+
+    // See the note on the fields - identity, not the zeros PushStruct leaves.
+    Result->CurrentView = Mat4Identity();
+    Result->CurrentProjection = Mat4Identity();
 
     Result->WhiteTexture = RendererCreateWhiteTexture(Result);
 
@@ -602,61 +625,97 @@ RefreshLitLocations(renderer *Renderer)
 }
 
 /*
-  Uploads one Setup command to the lit program.
+  Uploads one Camera command, and remembers it for the lighting command that
+  follows.
 
-  Every value arrives in the command rather than from a global in this file:
-  the scene describes its lights, and this only decides how to express them.
-
-  The world-to-view conversion stays here on purpose.  Which space this
-  renderer lights in is a rendering decision, not something the scene should
-  have to know about.
+  NOTE(yigit): View and projection go to EVERY 3D program, not just the lit one.
+  Uniforms belong to a program rather than to the context, so the ones set on
+  the lit program simply do not exist in the lamp one - setting them once and
+  expecting both to see it is the classic way to end up with lamp markers that
+  never move.
 */
 internal void
-SetLitUniforms(renderer *Renderer, render_command_setup *Setup)
+SetCameraUniforms(renderer *Renderer, render_command_camera *Camera)
 {
     RefreshLitLocations(Renderer);
 
     game_opengl_api *GL = Renderer->GL;
     lit_program_locations *L = &Renderer->LitLocations;
 
+    Renderer->CurrentView = Camera->View;
+    Renderer->CurrentProjection = Camera->Projection;
+
     // NOTE(yigit): The At-setters write to whatever program is BOUND, not to
     // whichever one the location came from.  Nothing warns when those differ,
     // so the bind has to happen here and not be assumed.
     GL->glUseProgram(Renderer->Programs[RenderProgram_Lit]);
 
-    SetUniformMat4At(GL, L->View, Setup->View);
-    SetUniformMat4At(GL, L->Projection, Setup->Projection);
+    SetUniformMat4At(GL, L->View, Camera->View);
+    SetUniformMat4At(GL, L->Projection, Camera->Projection);
+
+    // By NAME rather than by cached location, and it rebinds the program on its
+    // own - so this has to come after the At-setters above, not before.
+    uint32 Lamp = Renderer->Programs[RenderProgram_Lamp];
+    SetUniformMat4(GL, Lamp, "view", Camera->View);
+    SetUniformMat4(GL, Lamp, "projection", Camera->Projection);
+}
+
+/*
+  Uploads one Lighting command to the lit program.
+
+  Every value arrives in the command rather than from a global in this file:
+  the scene describes its lights, and this only decides how to express them.
+
+  The world-to-view conversion stays here on purpose.  Which space this
+  renderer lights in is a rendering decision, not something the scene should
+  have to know about - and the view matrix it needs comes from whichever Camera
+  command ran before this one, not from the command itself.
+*/
+internal void
+SetLitUniforms(renderer *Renderer, render_command_lighting *Lighting)
+{
+    RefreshLitLocations(Renderer);
+
+    game_opengl_api *GL = Renderer->GL;
+    lit_program_locations *L = &Renderer->LitLocations;
+
+    mat4 View = Renderer->CurrentView;
+
+    // See the note in SetCameraUniforms - the At-setters need the right program
+    // bound, and the lamp setters at the bottom of the camera path left the
+    // LAMP program bound.
+    GL->glUseProgram(Renderer->Programs[RenderProgram_Lit]);
 
     // The SPOTLIGHT - the flashlight held at the camera.  It needs no position
     // or direction uniform: in view space the camera is the origin looking down
     // -Z, so the shader has both as constants.
-    SetUniformVec3At(GL, L->SpotAmbient,  Setup->SpotAmbient);
-    SetUniformVec3At(GL, L->SpotDiffuse,  Setup->SpotDiffuse);
-    SetUniformVec3At(GL, L->SpotSpecular, Setup->SpotSpecular);
+    SetUniformVec3At(GL, L->SpotAmbient,  Lighting->SpotAmbient);
+    SetUniformVec3At(GL, L->SpotDiffuse,  Lighting->SpotDiffuse);
+    SetUniformVec3At(GL, L->SpotSpecular, Lighting->SpotSpecular);
 
-    SetUniformFloatAt(GL, L->SpotConstant,  Setup->SpotConstant);
-    SetUniformFloatAt(GL, L->SpotLinear,    Setup->SpotLinear);
-    SetUniformFloatAt(GL, L->SpotQuadratic, Setup->SpotQuadratic);
+    SetUniformFloatAt(GL, L->SpotConstant,  Lighting->SpotConstant);
+    SetUniformFloatAt(GL, L->SpotLinear,    Lighting->SpotLinear);
+    SetUniformFloatAt(GL, L->SpotQuadratic, Lighting->SpotQuadratic);
 
     // Already cosines by the time they arrive - the scene converts from degrees
     // once, rather than this doing it every frame.
-    SetUniformFloatAt(GL, L->SpotCutOff,      Setup->SpotCutOff);
-    SetUniformFloatAt(GL, L->SpotOuterCutOff, Setup->SpotOuterCutOff);
+    SetUniformFloatAt(GL, L->SpotCutOff,      Lighting->SpotCutOff);
+    SetUniformFloatAt(GL, L->SpotOuterCutOff, Lighting->SpotOuterCutOff);
 
     // NOTE(yigit): W is 0, not 1.  A direction has no location, so the view
     // matrix's translation column must not touch it.
-    vec4 DirView = Setup->View * Vec4(Setup->DirLightDirectionWorld, 0.0f);
+    vec4 DirView = View * Vec4(Lighting->DirLightDirectionWorld, 0.0f);
     SetUniformVec3At(GL, L->DirDirection, Vec3(DirView.X, DirView.Y, DirView.Z));
 
-    SetUniformVec3At(GL, L->DirAmbient,  Setup->DirAmbient);
-    SetUniformVec3At(GL, L->DirDiffuse,  Setup->DirDiffuse);
-    SetUniformVec3At(GL, L->DirSpecular, Setup->DirSpecular);
+    SetUniformVec3At(GL, L->DirAmbient,  Lighting->DirAmbient);
+    SetUniformVec3At(GL, L->DirDiffuse,  Lighting->DirDiffuse);
+    SetUniformVec3At(GL, L->DirSpecular, Lighting->DirSpecular);
 
     // NOTE(yigit): W is 1 here, not 0.  A position DOES get slid by the view
     // matrix's translation - that is the entire difference from the direction
     // above, and getting it backwards is the classic way to end up with lights
     // that drift as the camera moves.
-    uint32 LightCount = Setup->PointLightCount;
+    uint32 LightCount = Lighting->PointLightCount;
     if(LightCount > ArrayCount(L->PointLights))
     {
         LightCount = ArrayCount(L->PointLights);
@@ -664,10 +723,10 @@ SetLitUniforms(renderer *Renderer, render_command_setup *Setup)
 
     for(uint32 Index = 0; Index < LightCount; ++Index)
     {
-        render_point_light *Light = Setup->PointLights + Index;
+        render_point_light *Light = Lighting->PointLights + Index;
         point_light_locations *P = L->PointLights + Index;
 
-        vec4 PosView = Setup->View * Vec4(Light->PositionWorld, 1.0f);
+        vec4 PosView = View * Vec4(Light->PositionWorld, 1.0f);
 
         SetUniformVec3At(GL, P->Position, Vec3(PosView.X, PosView.Y, PosView.Z));
 
@@ -688,18 +747,14 @@ SetLitUniforms(renderer *Renderer, render_command_setup *Setup)
     SetUniformIntAt(GL, L->MaterialAlphaMask, 2);
 }
 
-// NOTE(yigit): View and projection have to be set here as well as on the lit
-// program.  Uniforms belong to a program, not to the context - the ones set
-// over there simply do not exist in this one.
+// NOTE(yigit): Only the colour.  View and projection are the camera's, and go
+// up in SetCameraUniforms along with the lit program's copies.
 internal void
-SetLampUniforms(game_opengl_api *GL, uint32 Program, render_command_setup *Setup)
+SetLampUniforms(game_opengl_api *GL, uint32 Program, render_command_lighting *Lighting)
 {
-    SetUniformMat4(GL, Program, "view", Setup->View);
-    SetUniformMat4(GL, Program, "projection", Setup->Projection);
-
     // Book ch. 14.4 exercise 1 - the marker takes the light's own colour, so
     // the lamp visibly matches what it is casting.
-    SetUniformVec4(GL, Program, "LightColor", Setup->SpotSpecular, 1.0f);
+    SetUniformVec4(GL, Program, "LightColor", Lighting->SpotSpecular, 1.0f);
 }
 
 /*
@@ -864,17 +919,23 @@ RenderBufferExecute(renderer *Renderer, render_buffer *Buffer)
                                  Command->Color.Z, Command->Color.W);
                 GL->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
             } break;
-
-            case RenderCommand_Setup:
+            case RenderCommand_Camera:
             {
-                render_command_setup *Setup = (render_command_setup *)Header;
+                render_command_camera *Command = (render_command_camera *)Header;
 
-                // NOTE(yigit): Both programs are told here and now, and
-                // neither can be told lazily at the draw that needs it -
-                // uniforms belong to a program, not to the context, so there
-                // is nowhere to stash this until later.
-                SetLitUniforms(Renderer, Setup);
-                SetLampUniforms(GL, Renderer->Programs[RenderProgram_Lamp], Setup);
+                // NOTE(yigit): Every program is told here and now, and none
+                // can be told lazily at the draw that needs it - uniforms
+                // belong to a program, not to the context, so there is nowhere
+                // to stash this until later.
+                SetCameraUniforms(Renderer, Command);
+            } break;
+
+            case RenderCommand_Lighting:
+            {
+                render_command_lighting *Command = (render_command_lighting *)Header;
+
+                SetLitUniforms(Renderer, Command);
+                SetLampUniforms(GL, Renderer->Programs[RenderProgram_Lamp], Command);
             } break;
 
             case RenderCommand_DrawModel:
@@ -899,9 +960,10 @@ RenderBufferExecute(renderer *Renderer, render_buffer *Buffer)
             // walk past quietly.  Header->Size means the stream stays readable
             // either way, which is exactly why the failure would otherwise be
             // invisible.
-            InvalidDefaultCase;
-        }
 
+            InvalidDefaultCase;
+
+        }
         At += Header->Size;
     }
 

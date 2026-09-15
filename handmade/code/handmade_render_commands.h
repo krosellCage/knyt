@@ -64,7 +64,8 @@ enum texture_filter
 enum render_command_type
 {
     RenderCommand_Clear,
-    RenderCommand_Setup,
+    RenderCommand_Camera,
+    RenderCommand_Lighting,
     RenderCommand_DrawModel,
     RenderCommand_DrawOverlay,
 };
@@ -98,21 +99,43 @@ struct render_command_clear
 };
 
 /*
-  Everything shared by every draw this frame: where the camera is and what the
-  lights are.  Pushed once, ahead of the draws.
+  Where the frame is being looked at from.  Pushed once, ahead of everything
+  that depends on it.
 
-  NOTE(yigit): Positions and directions are given in WORLD space, not view
-  space, even though the shaders want view space.  The conversion needs the
-  view matrix, which is a rendering detail - so the backend does it.  Handing
-  the backend view-space values would bake this renderer's choice of lighting
-  space into the command stream.
+  NOTE(yigit): Separate from the lighting command below even though both are
+  pushed together today, because they change for completely different reasons.
+  A camera is a camera under any lighting model; the Phong block below stops
+  existing the day a second model turns up.  Keeping them fused would mean
+  rewriting the camera path to change how lights work.
 */
-struct render_command_setup
+struct render_command_camera
 {
     render_command_header Header;
 
     mat4 View;
     mat4 Projection;
+};
+
+/*
+  Every light in the scene.  Pushed once, AFTER the camera and ahead of the
+  draws - see the ordering note in render_command_camera.
+
+  NOTE(yigit): Positions and directions are given in WORLD space, not view
+  space, even though the shaders want view space.  The conversion needs the
+  view matrix, which is a rendering detail - so the backend does it, using the
+  camera it was handed.  Handing the backend view-space values would bake this
+  renderer's choice of lighting space into the command stream.
+
+  NOTE(yigit): This whole struct is Phong-shaped, and deliberately so.  Ambient,
+  diffuse and specular PER LIGHT is not a universal way to describe lighting -
+  it is how the Blinn-Phong shaders in handmade/data want to be fed.  A physical
+  model would replace it with a colour and an intensity per light and move the
+  rest onto the material.  That is a NEW command type alongside this one rather
+  than an edit to it; Header->Size is what makes adding one safe.
+*/
+struct render_command_lighting
+{
+    render_command_header Header;
 
     vec3 DirLightDirectionWorld;
     vec3 DirAmbient;
@@ -256,18 +279,33 @@ PushClear(render_buffer *Buffer, vec4 Color)
     }
 }
 
-// Returns the command so the caller can fill in the lights, which are too many
-// to pass as arguments without the call site becoming unreadable.
-internal render_command_setup *
-PushSetup(render_buffer *Buffer, mat4 View, mat4 Projection)
+internal void
+PushCamera(render_buffer *Buffer, mat4 View, mat4 Projection)
 {
-    render_command_setup *Command =
-        PushRenderCommand(Buffer, render_command_setup, RenderCommand_Setup);
+    render_command_camera *Command =
+        PushRenderCommand(Buffer, render_command_camera, RenderCommand_Camera);
 
     if(Command)
     {
         Command->View = View;
         Command->Projection = Projection;
+    }
+}
+
+// Returns the command so the caller can fill in the lights, which are too many
+// to pass as arguments without the call site becoming unreadable.
+//
+// NOTE(yigit): Must be pushed after a PushCamera.  The backend needs the view
+// matrix to put these lights in the space its shaders light in, and it takes
+// that from whichever camera command came before.
+internal render_command_lighting *
+PushLighting(render_buffer *Buffer)
+{
+    render_command_lighting *Command =
+        PushRenderCommand(Buffer, render_command_lighting, RenderCommand_Lighting);
+
+    if(Command)
+    {
         Command->PointLightCount = 0;
     }
 

@@ -96,8 +96,7 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
         // allocation happens once.  The BUFFER is reset every frame, not the
         // arena - the arena hands out its block a single time and never again.
         RenderBufferInitialize(&State->RenderBuffer, &State->WorldArena,
-                               Megabytes(1));
-
+                              Megabytes(1));
         // NOTE(yigit): PermanentStorage starts zeroed, so these would be all
         // zeros - and a zero-length CameraFront would make LookAt degenerate.
         CameraInitialize(&State->Camera, Vec3(0.0f, 0.0f, 3.0f));
@@ -210,22 +209,27 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
 
     PushClear(&State->RenderBuffer, Vec4(0.0f, 0.0f, 0.0f, 1.0f));
 
-    render_command_setup *Setup = PushSetup(&State->RenderBuffer, View, Projection);
-    if(Setup)
-    {
-        Setup->DirLightDirectionWorld = GlobalDirLightDirection;
-        Setup->DirAmbient  = Vec3(0.05f, 0.05f, 0.05f);
-        Setup->DirDiffuse  = Vec3(1.0f, 0.55f, 0.2f);
-        Setup->DirSpecular = Vec3(0.50f, 0.50f, 0.50f);
+    PushCamera(&State->RenderBuffer, View, Projection);
 
-        Setup->PointLightCount = ArrayCount(GlobalPointLightPositions);
-        Assert(Setup->PointLightCount <= ArrayCount(Setup->PointLights));
+    // NOTE(yigit): After the camera, not before.  The backend needs the view
+    // matrix to move these lights into the space it lights in, and it takes
+    // that from the camera command that ran ahead of this one.
+    render_command_lighting *Lighting = PushLighting(&State->RenderBuffer);
+    if(Lighting)
+    {
+        Lighting->DirLightDirectionWorld = GlobalDirLightDirection;
+        Lighting->DirAmbient  = Vec3(0.05f, 0.05f, 0.05f);
+        Lighting->DirDiffuse  = Vec3(1.0f, 0.55f, 0.2f);
+        Lighting->DirSpecular = Vec3(0.50f, 0.50f, 0.50f);
+
+        Lighting->PointLightCount = ArrayCount(GlobalPointLightPositions);
+        Assert(Lighting->PointLightCount <= ArrayCount(Lighting->PointLights));
 
         for(uint32 LightIndex = 0;
-            LightIndex < Setup->PointLightCount;
+            LightIndex < Lighting->PointLightCount;
             ++LightIndex)
         {
-            render_point_light *Light = Setup->PointLights + LightIndex;
+            render_point_light *Light = Lighting->PointLights + LightIndex;
 
             Light->PositionWorld = GlobalPointLightPositions[LightIndex];
             Light->Ambient  = Vec3(0.05f, 0.05f, 0.05f);
@@ -241,19 +245,19 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
         // The flashlight held at the camera.  No position or direction: in view
         // space the camera is the origin looking down -Z, so the shader has
         // both as constants.
-        Setup->SpotAmbient  = Vec3(0.10f, 0.10f, 0.10f);
-        Setup->SpotDiffuse  = Vec3(0.50f, 0.50f, 0.50f);
-        Setup->SpotSpecular = Vec3(1.00f, 1.00f, 1.00f);
-        Setup->SpotConstant  = 1.0f;
-        Setup->SpotLinear    = 0.09f;
-        Setup->SpotQuadratic = 0.032f;
+        Lighting->SpotAmbient  = Vec3(0.10f, 0.10f, 0.10f);
+        Lighting->SpotDiffuse  = Vec3(0.50f, 0.50f, 0.50f);
+        Lighting->SpotSpecular = Vec3(1.00f, 1.00f, 1.00f);
+        Lighting->SpotConstant  = 1.0f;
+        Lighting->SpotLinear    = 0.09f;
+        Lighting->SpotQuadratic = 0.032f;
 
         // NOTE(yigit): Converted to cosines HERE, once, rather than in the
         // backend every frame.  Cos takes radians - passing 12.5 raw would be
         // 12.5 radians, which works out as a 3.8 degree cone: wrong, but close
         // enough to look plausible.
-        Setup->SpotCutOff      = Cos(12.5f*Pi32 / 180.0f);
-        Setup->SpotOuterCutOff = Cos(17.5f*Pi32 / 180.0f);
+        Lighting->SpotCutOff      = Cos(12.5f*Pi32 / 180.0f);
+        Lighting->SpotOuterCutOff = Cos(17.5f*Pi32 / 180.0f);
     }
 
     // NOTE(yigit): Sponza is modelled at roughly 3700 x 1550 x 2300 units and
@@ -278,7 +282,6 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
                           Mat4Scale(0.2f, 0.2f, 0.2f)),
                   RenderProgram_Lamp);
     }
-
     // ---------------------------------------------------------------------
     // The 2D overlay - pushed last, so it sits on top of everything
     //
@@ -316,10 +319,8 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
                  (uint32)State->RenderBuffer.Used);
         OverlayPushText(&State->Overlay, &State->DebugFont, 12.0f, LineY, Line);
     }
-
     PushOverlay(&State->RenderBuffer, &State->Overlay, &State->DebugFont,
                 OverlayProjection, Vec3(0.95f, 0.93f, 0.85f));
-
     // ------------------------------------------------------------------
     // Execute
     //
