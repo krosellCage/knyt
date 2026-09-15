@@ -33,6 +33,11 @@
 
 #include "handmade_platform.h"
 
+// The longest dt the game is ever handed, in seconds.  See the note on
+// WIN32_MAX_FRAME_SECONDS - same reasoning, same value, so the two platforms
+// behave identically after a stall.
+#define X_MAX_FRAME_SECONDS 0.1f
+
 #define X_STATE_FILE_NAME_LENGTH 512
 
 // NOTE(yigit): The game's sound mixer works eight samples at a time, so the

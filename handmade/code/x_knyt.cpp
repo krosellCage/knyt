@@ -1260,13 +1260,38 @@ int main()
 
         bool32 SleepIsGranular = XIsSleepGranular();
         timespec LastCounter = XGetWallClock();
+
+        // Carries the previous frame's measured duration forward - it is what
+        // dtForFrame is taken from at the top of the loop.
+        real32 MSPerFrameLastFrame = 0.0f;
         uint64 LastCycleCount = __rdtsc();
 
         XInitJoysticks(&State);
 
         while(GlobalRunning)
         {
-            NewInput->dtForFrame= TargetSecondsPerFrame;
+            /*
+              NOTE(yigit): The MEASURED duration of the previous frame, not
+              TargetSecondsPerFrame.  The target is a constant, so feeding it
+              here made the ms/fps readout show the same number forever and
+              made every movement pretend the frame had been on time even when
+              it had not.
+
+              Clamped for the same reason the Win32 layer clamps: a frame can
+              be arbitrarily long, and without a ceiling the camera teleports
+              on the first frame after a breakpoint or a window drag.
+            */
+            real32 FrameSeconds = 0.001f*MSPerFrameLastFrame;
+            if(FrameSeconds <= 0.0f)
+            {
+                FrameSeconds = TargetSecondsPerFrame;   // frame one
+            }
+            if(FrameSeconds > X_MAX_FRAME_SECONDS)
+            {
+                FrameSeconds = X_MAX_FRAME_SECONDS;
+            }
+
+            NewInput->dtForFrame = FrameSeconds;
             NewInput->WindowWidth = WindowDimensions.Width;
             NewInput->WindowHeight = WindowDimensions.Height;
 
@@ -1386,6 +1411,10 @@ int main()
 
                 timespec EndCounter = XGetWallClock();
                 real32 MSPerFrame = 1000.0f*XGetSecondsElapsed(LastCounter, EndCounter);
+
+                // Carried to the top of the next iteration, which is where the
+                // game is handed its dt - see the note there.
+                MSPerFrameLastFrame = MSPerFrame;
 
                 LastCounter = EndCounter;
 
