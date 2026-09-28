@@ -7,6 +7,8 @@ OpenGL 3.3 core for the rendering.
 There is no GLFW, no GLAD, no GLM. The window, the input, the audio, the
 extension loading, the matrix maths and the camera are all in this repository.
 
+![Sponza: HDR, sun shadows, bloom, ACES tonemapping](handmade/misc/sponza.webp)
+
 **[▶ Demo video](handmade/misc/cubes.mp4)** — lit cube, orbiting light, fly camera.
 
 ## Building
