@@ -13,8 +13,8 @@
 #include "handmade_shader.h"
 
 // NOTE(yigit): Only for snprintf, which builds the "pointLights[2].quadratic"
-// style uniform names in handmade_render_opengl.h.  The book concatenates those with
-// std::string; there is none here.  Must come before the two headers below,
+// style uniform names in handmade_render_opengl.h - there is no std::string
+// here to glue them together with.  Must come before the two headers below,
 // which both use it.
 #include <stdio.h>
 
@@ -27,21 +27,9 @@
 // the backend.  That is the push buffer's actual effect: the scene says what
 // its lights are, and the backend only decides how to express them.
 
-// Book ch. 17.1 - the sun.  World space, pointing INTO the scene: down and
+// The sun.  World space, pointing INTO the scene: down and
 // slightly back-left.
 global_variable const vec3 GlobalDirLightDirection = {-0.2f, -1.0f, -0.3f};
-
-// Book ch. 17.3, p. 176 - four point lights.  WORLD space; the backend
-// converts to view space, because which space this renderer lights in is not
-// something the scene should have to know.  A lamp marker is drawn at each, so
-// what you see is where the light is.
-global_variable const vec3 GlobalPointLightPositions[] =
-{
-    { 0.7f,  0.2f,   2.0f},
-    { 2.3f, -3.3f,  -4.0f},
-    {-4.0f,  2.0f, -12.0f},
-    { 0.0f,  0.0f,  -3.0f},
-};
 
 internal void
 GameInitScene(thread_context *Thread, game_memory *Memory, game_state *State)
@@ -54,6 +42,9 @@ GameInitScene(thread_context *Thread, game_memory *Memory, game_state *State)
     State->MarkerModel = GameLoadModel(Thread, Memory, State->Renderer, &State->TransientArena,
                                        "data\\cube.obj");
 
+    State->Skybox = GameLoadCubemapCross(Thread, Memory, State->Renderer, &State->TransientArena,
+                                         "data\\skybox.png");
+
     // The CPU array is the game's; the GPU buffer behind the handle is the
     // backend's.
     OverlayAllocate(&State->Overlay, &State->WorldArena);
@@ -63,6 +54,111 @@ GameInitScene(thread_context *Thread, game_memory *Memory, game_state *State)
     // are both dead once the texture is uploaded and the quads are copied out.
     State->DebugFont = GameLoadFont(Thread, Memory, State->Renderer, &State->TransientArena,
                                     "data\\font.ttf", 18.0f);
+}
+
+// ------------------------------------------------------------------------
+// Debug sliders - see debug_ui in handmade.h.
+// ------------------------------------------------------------------------
+
+/*
+  Once per frame, before any DebugSlider.
+
+  NOTE(yigit): "Just pressed" is worked out HERE, from our own copy of last
+  frame's button, and not from HalfTransitionCount.  The platform never resets
+  the MOUSE buttons' HalfTransitionCount, and compares against the input
+  buffer from two frames ago, so it cannot answer "did this go down this
+  frame?".  EndedDown is correct every frame, and that is all this needs.
+
+  Once per frame and not once per slider: if each slider updated
+  MouseWasDown, the first one would mark the press as seen and every slider
+  after it would miss it.
+*/
+internal void
+DebugUIBegin(debug_ui *UI, game_input *Input)
+{
+    UI->MouseX = (real32)Input->MouseX;
+    UI->MouseY = (real32)Input->MouseY;
+
+    UI->MouseDown    = Input->MouseButtons[0].EndedDown;
+    UI->MousePressed = UI->MouseDown && !UI->MouseWasDown;
+}
+
+// Once per frame, after the last DebugSlider.
+internal void
+DebugUIEnd(debug_ui *UI)
+{
+    // Let go: nothing is being dragged any more.
+    if(!UI->MouseDown)
+    {
+        UI->ActiveValue = 0;
+    }
+
+    UI->MouseWasDown = UI->MouseDown;
+}
+
+/*
+  A horizontal slider that edits *Value between Min and Max.  Handles the
+  mouse and draws itself in the same call, every frame.
+
+  X, Y is the top-left of the TRACK; the label sits just above it.
+*/
+internal void
+DebugSlider(debug_ui *UI, overlay *Overlay, loaded_font *Font,
+            real32 X, real32 Y, real32 Width,
+            const char *Label, real32 *Value, real32 Min, real32 Max)
+{
+    real32 Height = 12.0f;
+
+    // 1. Hover.
+    bool32 Over = ((UI->MouseX >= X) && (UI->MouseX < (X + Width)) &&
+                   (UI->MouseY >= Y) && (UI->MouseY < (Y + Height)));
+
+    // 2. Grab.  PRESSED, not down: a drag that started somewhere else must
+    //    not pick up every slider it passes over.
+    if(UI->MousePressed && Over)
+    {
+        UI->ActiveValue = Value;
+    }
+
+    // 3. Drag.  Keyed on being the active slider, NOT on Over, so the drag
+    //    carries on when the mouse slips above, below or past the ends - it
+    //    only stops when the button is let go (DebugUIEnd).
+    bool32 Active = (UI->ActiveValue == Value);
+    if(Active)
+    {
+        real32 T = (UI->MouseX - X) / Width;
+        if(T < 0.0f) { T = 0.0f; }
+        if(T > 1.0f) { T = 1.0f; }
+
+        *Value = Min + T*(Max - Min);
+    }
+
+    // 4. Draw, from the value AFTER step 3 may have changed it - so the
+    //    slider never shows last frame's value while being dragged.
+    //
+    //    Clamped again because something else can move the value too: the
+    //    arrow keys, or a range change while the game is running.
+    real32 Fill = (*Value - Min) / (Max - Min);
+    if(Fill < 0.0f) { Fill = 0.0f; }
+    if(Fill > 1.0f) { Fill = 1.0f; }
+
+    // Brighter while hovered, brightest while dragged - so it is obvious
+    // which slider the mouse is about to take.
+    vec4 FillColor = Vec4(0.45f, 0.45f, 0.50f, 1.0f);
+    if(Over)   { FillColor = Vec4(0.60f, 0.60f, 0.68f, 1.0f); }
+    if(Active) { FillColor = Vec4(0.95f, 0.70f, 0.30f, 1.0f); }
+
+    // Back to front: each one is pushed after, and so drawn over, the last.
+    OverlayPushRect(Overlay, Font, X, Y, Width, Height,
+                    Vec4(0.0f, 0.0f, 0.0f, 0.6f));
+    OverlayPushRect(Overlay, Font, X, Y, Fill*Width, Height, FillColor);
+    OverlayPushRect(Overlay, Font, X + Fill*Width - 2.0f, Y - 2.0f, 4.0f, Height + 4.0f,
+                    Vec4(1.0f, 1.0f, 1.0f, 1.0f));
+
+    // The label, with its baseline just above the track.
+    char Text[64];
+    snprintf(Text, sizeof(Text), "%s  %.2f", Label, *Value);
+    OverlayPushText(Overlay, Font, X, Y - 4.0f, Text, Vec4(0.95f, 0.93f, 0.85f, 1.0f));
 }
 
 extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
@@ -111,6 +207,7 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
         State->Renderer = RendererInitialize(Memory, &State->WorldArena);
 
         GameInitScene(Thread, Memory, State);
+        State->Exposure = 1.0f;
         Memory->IsInitialized = true;
     }
 
@@ -127,10 +224,12 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
 
     real32 DeltaTime = Input->dtForFrame;
 
-
-    CameraProcessMouseLook(&State->Camera,
-                           (real32)Input->MouseDeltaX,
-                           (real32)Input->MouseDeltaY);
+    if(!Input->CursorFree)
+    {
+        CameraProcessMouseLook(&State->Camera,
+                (real32)Input->MouseDeltaX,
+                (real32)Input->MouseDeltaY);
+    }
 
     CameraProcessZoom(&State->Camera, (real32)Input->MouseZ);
 
@@ -161,6 +260,18 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     {
         State->Camera.MovementSpeed += CAMERA_SPEED_ADJUST_RATE * DeltaTime;
     }
+#define EXPOSURE_ADJUST_RATE 0.3f
+#define EXPOSURE_MIN 0.1f
+#define EXPOSURE_MAX 8.0f
+    if(Keyboard->ActionUp.EndedDown)
+    {
+        State->Exposure += EXPOSURE_ADJUST_RATE * DeltaTime;
+    }
+    if(Keyboard->ActionDown.EndedDown)
+    {
+        
+        State->Exposure -= EXPOSURE_ADJUST_RATE * DeltaTime;
+    }
 
     // NOTE(yigit): Clamped because the speed lives in game_state and persists
     // across DLL reloads.  Without a floor it would go negative and invert the
@@ -173,6 +284,16 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     if(State->Camera.MovementSpeed > CAMERA_MAX_SPEED)
     {
         State->Camera.MovementSpeed = CAMERA_MAX_SPEED;
+    }
+
+    if(State->Exposure > EXPOSURE_MAX)
+    {
+        State->Exposure = EXPOSURE_MAX;
+    }
+
+    if(State->Exposure < EXPOSURE_MIN)
+    {
+        State->Exposure = EXPOSURE_MIN;
     }
 
     game_controller_input *Pad = GetController(Input, 1);
@@ -205,7 +326,43 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     // into GL calls.  Swapping in a Vulkan backend means writing a second
     // RenderBufferExecute and changing nothing here.
     // ------------------------------------------------------------------
+
+    // NOTE(yigit): FIRST, before anything is pushed.  Reset empties the
+    // buffer, so every command pushed ahead of it is thrown away unexecuted.
     RenderBufferReset(&State->RenderBuffer);
+
+    // ------------------------------------------------------------------
+    // The sun's camera, for the shadow map.
+    //
+    // A directional light has no position - it is infinitely far away and
+    // its rays are parallel.  So the camera is ORTHOGRAPHIC (no perspective:
+    // parallel rays stay parallel), and it is placed "far enough back" along
+    // the light direction to see the whole scene.
+    //
+    // The box has to contain everything that should cast a shadow.  Sponza
+    // at scale 0.02 is about 76 x 30 x 48 units around the origin, so a box
+    // 90 units across, looking down from 60 units away, covers all of it.
+    // ------------------------------------------------------------------
+    vec3 SunDirection = Normalize(GlobalDirLightDirection);
+    vec3 SceneCenter  = Vec3(0.0f, 10.0f, 0.0f);
+
+    // Step BACK from the centre, against the direction the light travels.
+    vec3 SunEye = SceneCenter - SunDirection*60.0f;
+
+    mat4 SunView       = Mat4LookAt(SunEye, SceneCenter, Vec3(0.0f, 1.0f, 0.0f));
+    mat4 SunProjection = Mat4Ortho(-45.0f, 45.0f, -45.0f, 45.0f, 1.0f, 150.0f);
+
+    // Projection AFTER view, so on the LEFT - same order as a normal camera.
+    mat4 LightSpace = Mat4Mul(SunProjection, SunView);
+
+    PushShadowPass(&State->RenderBuffer, LightSpace);
+
+    // Only things that CAST shadows go here.  Just Sponza - the lamp cubes
+    // are light sources, and a light should not block its own light.
+    PushModel(&State->RenderBuffer, &State->Model,
+            Mat4Scale(0.02f, 0.02f, 0.02f), RenderProgram_Shadow, StencilMode_Off);
+
+    PushBeginScene(&State->RenderBuffer, Input->WindowWidth, Input->WindowHeight);   
 
     PushClear(&State->RenderBuffer, Vec4(0.0f, 0.0f, 0.0f, 1.0f));
 
@@ -222,42 +379,9 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
         Lighting->DirDiffuse  = Vec3(1.0f, 0.55f, 0.2f);
         Lighting->DirSpecular = Vec3(0.50f, 0.50f, 0.50f);
 
-        Lighting->PointLightCount = ArrayCount(GlobalPointLightPositions);
-        Assert(Lighting->PointLightCount <= ArrayCount(Lighting->PointLights));
-
-        for(uint32 LightIndex = 0;
-            LightIndex < Lighting->PointLightCount;
-            ++LightIndex)
-        {
-            render_point_light *Light = Lighting->PointLights + LightIndex;
-
-            Light->PositionWorld = GlobalPointLightPositions[LightIndex];
-            Light->Ambient  = Vec3(0.05f, 0.05f, 0.05f);
-            Light->Diffuse = Vec3(0.50f, 0.50f, 0.50f);
-            Light->Specular = Vec3(0.50f, 0.50f, 0.50f);
-
-            // Book ch. 16.2 - the table row for a range of about 50 units.
-            Light->Constant  = 1.0f;
-            Light->Linear    = 0.09f;
-            Light->Quadratic = 0.032f;
-        }
-
-        // The flashlight held at the camera.  No position or direction: in view
-        // space the camera is the origin looking down -Z, so the shader has
-        // both as constants.
-        Lighting->SpotAmbient  = Vec3(0.10f, 0.10f, 0.10f);
-        Lighting->SpotDiffuse  = Vec3(0.50f, 0.50f, 0.50f);
-        Lighting->SpotSpecular = Vec3(1.00f, 1.00f, 1.00f);
-        Lighting->SpotConstant  = 1.0f;
-        Lighting->SpotLinear    = 0.09f;
-        Lighting->SpotQuadratic = 0.032f;
-
-        // NOTE(yigit): Converted to cosines HERE, once, rather than in the
-        // backend every frame.  Cos takes radians - passing 12.5 raw would be
-        // 12.5 radians, which works out as a 3.8 degree cone: wrong, but close
-        // enough to look plausible.
-        Lighting->SpotCutOff      = Cos(12.5f*Pi32 / 180.0f);
-        Lighting->SpotOuterCutOff = Cos(17.5f*Pi32 / 180.0f);
+        // The sun is the only light.  No point lights: PushLighting starts
+        // PointLightCount at 0, and the shader only loops over as many as it
+        // is told there are.
     }
 
     // NOTE(yigit): Sponza is modelled at roughly 3700 x 1550 x 2300 units and
@@ -266,22 +390,13 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     // out to 5000, which would spend the depth buffer on empty space and bring
     // back z-fighting.
     PushModel(&State->RenderBuffer, &State->Model,
-              Mat4Scale(0.02f, 0.02f, 0.02f), RenderProgram_Lit);
+              Mat4Scale(0.02f, 0.02f, 0.02f), RenderProgram_Lit, StencilMode_Off);
 
-    for(uint32 LightIndex = 0;
-        LightIndex < ArrayCount(GlobalPointLightPositions);
-        ++LightIndex)
-    {
-        vec3 P = GlobalPointLightPositions[LightIndex];
+    // After every opaque draw, so the depth test hides the sky wherever
+    // something is in front of it - see render_command_draw_skybox.
+    PushSkybox(&State->RenderBuffer, State->Skybox);
 
-        // Scale on the RIGHT so it happens first: shrink the cube at the
-        // origin, then move it out to the light.  The other order would scale
-        // the translation too and put the marker at a fifth of the distance.
-        PushModel(&State->RenderBuffer, &State->MarkerModel,
-                  Mat4Mul(Mat4Translation(P.X, P.Y, P.Z),
-                          Mat4Scale(0.2f, 0.2f, 0.2f)),
-                  RenderProgram_Lamp);
-    }
+    PushEndScene(&State->RenderBuffer, State->Exposure);
     // ---------------------------------------------------------------------
     // The 2D overlay - pushed last, so it sits on top of everything
     //
@@ -290,6 +405,11 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     // ---------------------------------------------------------------------
     OverlayReset(&State->Overlay);
 
+    OverlayPushRect(&State->Overlay, &State->DebugFont,
+            6.0f, 6.0f, 360.0f, 4.0f*State->DebugFont.LineHeight + 10.0f,
+            Vec4(0.0f, 0.0f, 0.0f, 0.5f));
+
+    vec4 TextColor = Vec4(0.95f, 0.93f, 0.85f, 1.0f);
     // NOTE(yigit): TOP-left origin - Bottom and Top are passed the other way
     // round from the usual OpenGL convention, so Y grows DOWNWARD.  That is
     // what stb_truetype's glyph offsets assume and what text layout is
@@ -305,20 +425,62 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
         snprintf(Line, sizeof(Line), "%.2f ms  %.0f fps",
                  1000.0f*Input->dtForFrame,
                  (Input->dtForFrame > 0.0f) ? (1.0f / Input->dtForFrame) : 0.0f);
-        OverlayPushText(&State->Overlay, &State->DebugFont, 12.0f, LineY, Line);
+        OverlayPushText(&State->Overlay, &State->DebugFont, 12.0f, LineY, Line, TextColor);
         LineY += State->DebugFont.LineHeight;
 
         snprintf(Line, sizeof(Line), "pos %.1f %.1f %.1f   speed %.1f",
                  State->Camera.Position.X, State->Camera.Position.Y,
                  State->Camera.Position.Z, State->Camera.MovementSpeed);
-        OverlayPushText(&State->Overlay, &State->DebugFont, 12.0f, LineY, Line);
+        OverlayPushText(&State->Overlay, &State->DebugFont, 12.0f, LineY, Line, TextColor);
         LineY += State->DebugFont.LineHeight;
 
         snprintf(Line, sizeof(Line), "%u tris  %u submeshes  %u cmd bytes",
                  State->Model.IndexCount / 3, State->Model.SubmeshCount,
                  (uint32)State->RenderBuffer.Used);
-        OverlayPushText(&State->Overlay, &State->DebugFont, 12.0f, LineY, Line);
+
+        OverlayPushText(&State->Overlay, &State->DebugFont, 12.0f, LineY, Line, TextColor);
+
+        snprintf(Line, sizeof(Line), "exposure %.1f",
+                 State->Exposure);
+
+        LineY += State->DebugFont.LineHeight;
+        OverlayPushText(&State->Overlay, &State->DebugFont, 12.0f, LineY, Line,
+                Vec4(1.0f, 0.8f, 0.2f, 1.0f));
     }
+
+    if(Input->CursorFree)
+    {
+        // NOTE(yigit): These change State->Exposure AFTER PushEndScene has
+        // already copied it into its command, so a drag shows up one frame
+        // late.  At 60 fps nobody can see that, and it keeps the sliders with
+        // the rest of the overlay.
+        DebugUIBegin(&State->UI, Input);
+
+        DebugSlider(&State->UI, &State->Overlay, &State->DebugFont,
+                    12.0f, 130.0f, 300.0f,
+                    "exposure", &State->Exposure, EXPOSURE_MIN, EXPOSURE_MAX);
+        DebugSlider(&State->UI, &State->Overlay, &State->DebugFont,
+                    12.0f, 170.0f, 300.0f,
+                    "camera speed", &State->Camera.MovementSpeed,
+                    CAMERA_MIN_SPEED, CAMERA_MAX_SPEED);
+
+        DebugUIEnd(&State->UI);
+
+        // The mouse marker last, so it is drawn over the sliders.
+        OverlayPushRect(&State->Overlay, &State->DebugFont,
+                (real32)Input->MouseX, (real32)Input->MouseY, 10.0f, 10.0f,
+                Vec4(1.0f, 0.3f, 0.2f, 1.0f));
+    }
+    else
+    {
+        // Leaving cursor mode mid-drag must not leave a slider grabbed - the
+        // next time Tab is pressed it would follow the mouse with no click.
+        // MouseWasDown is cleared too, so a button held across the switch
+        // does not count as already seen.
+        State->UI.ActiveValue = 0;
+        State->UI.MouseWasDown = false;
+    }
+    
     PushOverlay(&State->RenderBuffer, &State->Overlay, &State->DebugFont,
                 OverlayProjection, Vec3(0.95f, 0.93f, 0.85f));
     // ------------------------------------------------------------------

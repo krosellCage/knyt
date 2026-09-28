@@ -1,8 +1,8 @@
 #if !defined(HANDMADE_OBJ_H)
 /*
-  NOTE(yigit): Wavefront OBJ loading, replacing the book's use of Assimp
-  (ch. 18-20).  Assimp reads forty formats; this reads one, which is why it
-  fits in a header instead of a library.
+  NOTE(yigit): Wavefront OBJ loading, instead of a library like Assimp.
+  Assimp reads forty formats; this reads one, which is why it fits in a
+  header.
 
   OBJ is line-based plain text.  Four line types carry the geometry:
 
@@ -511,7 +511,7 @@ ObjParseSourceData(memory_arena *Arena, char *Contents, uint32 ContentsSize)
             //
             // NOTE(yigit): A fan is only correct for CONVEX faces.  Exporters
             // emit convex polygons in practice, and anything concave would need
-            // real triangulation - out of scope while the book only ever loads
+            // real triangulation - out of scope while every model here is
             // triangles and quads.
             obj_face_vertex First = {};
             obj_face_vertex Previous = {};
@@ -611,8 +611,7 @@ ObjParseSourceData(memory_arena *Arena, char *Contents, uint32 ContentsSize)
 // has to become one vertex, and repeated triples have to collapse onto the
 // same index or the buffer is three times bigger than it needs to be.
 //
-// This is the step Assimp does invisibly, and the reason the book never makes
-// you think about it.
+// This is the step a library like Assimp does invisibly.
 // ---------------------------------------------------------------------------
 
 // 32 bytes: 3 position, 3 normal, 2 texcoord, an 8-float stride.  The backend
@@ -652,7 +651,7 @@ struct obj_material
     char DiffuseMapName[OBJ_MAX_MAP_NAME];
     bool32 HasDiffuseMap;
 
-    // Book ch. 22 - map_d, an opacity mask.  Sponza uses it for foliage and
+    // map_d, an opacity mask.  Sponza uses it for foliage and
     // chains: the geometry is a flat card and the mask is what cuts the leaf
     // shape out of it.
     //

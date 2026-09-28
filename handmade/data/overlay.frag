@@ -2,6 +2,7 @@
 out vec4 FragColor;
 
 in vec2 TexCoords;
+in vec4 Color;
 
 uniform sampler2D atlas;
 uniform vec3 color;
@@ -16,6 +17,5 @@ void main()
     // That alpha is a partial value at every antialiased edge, which is why
     // this pass needs real blending and cannot use discard.
     float Coverage = texture(atlas, TexCoords).r;
-
-    FragColor = vec4(color, Coverage);
+    FragColor = vec4(Color.rgb, Color.a * Coverage);
 }

@@ -18,7 +18,6 @@ handmade/misc/shell.bat
 *.exe
 *.dll
 *.pdb
-*.obj
 *.map
 *.exp
 *.lib
@@ -44,6 +43,13 @@ handmade/data/container2.png
 handmade/data/container2_specular.png
 handmade/data/matrix.jpg
 handmade/data/lighting_maps_specular_color.png
+
+# NOTE(yigit): There is no blanket *.obj here, and there must not be.  A
+# Wavefront model and an MSVC object file share an extension, and the blanket
+# pattern silently swallowed cube.obj - the lamp markers stopped drawing and
+# nothing reported it, because a model that fails to load draws nothing by
+# design.  The compiler's .obj files land in build/, which is ignored whole a
+# few lines up, so the pattern was never doing any work in the first place.
 
 # Models I did not make.  cube.obj is written here and stays.
 # Sponza - Crytek/Frank Meinl, via casual-effects.com.

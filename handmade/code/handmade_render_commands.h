@@ -35,9 +35,53 @@ enum render_program
 {
     RenderProgram_Lit,
     RenderProgram_Lamp,
+
+    // One flat colour, for the second pass of a stencil outline.
+    // Separate from Lamp because the lamp takes the light's own colour, and a
+    // white light would make an outline the same colour as the thing it is
+    // outlining - a feature that works perfectly and cannot be seen.
+    RenderProgram_Outline,
+
     RenderProgram_Overlay,
 
+    // The sky: a cube map sampled by view direction, drawn behind everything.
+    RenderProgram_Skybox,
+
+    RenderProgram_Tonemap,
+
+    // Bloom: shrink the HDR image down a chain of smaller textures, then grow
+    // it back up, adding each level together.
+    RenderProgram_BloomDown,
+    RenderProgram_BloomUp,
+
+    // Depth only, from the sun.  Fills the shadow map.
+    RenderProgram_Shadow,
+
     RenderProgram_Count,
+};
+
+/*
+  What a draw does with the stencil buffer.  An outline takes two
+  draws of the same object:
+
+    1. StencilMode_Write   - draw the object normally, and mark every pixel it
+                             covers with a 1 in the stencil buffer.
+    2. StencilMode_Outside - draw a slightly BIGGER copy, but only on pixels
+                             that are NOT marked.  What survives is the thin
+                             rim around the first draw: the outline.
+
+  Everything else draws with StencilMode_Off, which neither tests nor writes.
+
+  NOTE(yigit): The stencil buffer is cleared once per frame, in the Clear
+  command, not per object.  So an outline also stays off every object marked
+  EARLIER in the frame, which is what you want - one lamp's rim should not be
+  painted over another lamp.
+*/
+enum stencil_mode
+{
+    StencilMode_Off,
+    StencilMode_Write,
+    StencilMode_Outside,
 };
 
 /*
@@ -61,13 +105,23 @@ enum texture_filter
     TextureFilter_LinearMipmap,     // build mipmaps: this will be seen at a distance
 };
 
+enum texture_encoding
+{
+    TextureEncoding_Linear,     // data: masks, normals, coverage
+    TextureEncoding_SRGB,       // colour: diffuse maps, skies
+};
+
 enum render_command_type
 {
+    RenderCommand_BeginScene,
+    RenderCommand_EndScene,
     RenderCommand_Clear,
     RenderCommand_Camera,
     RenderCommand_Lighting,
     RenderCommand_DrawModel,
     RenderCommand_DrawOverlay,
+    RenderCommand_DrawSkybox,
+    RenderCommand_ShadowPass,
 };
 
 // NOTE(yigit): Size is what lets commands be different sizes.  A Clear is
@@ -96,6 +150,50 @@ struct render_command_clear
 {
     render_command_header Header;
     vec4 Color;
+};
+
+// Everything after this draws into the HDR target instead of the window.
+// Carries the window size because the backend has no other way to learn it.
+struct render_command_begin_scene
+{
+    render_command_header Header;
+    int32 Width;
+    int32 Height;
+};
+
+// Puts the HDR target on screen and goes back to drawing into the window.
+struct render_command_end_scene
+{
+    render_command_header Header;
+    real32 Exposure;
+};
+
+/*
+  The sky.  Push it AFTER the opaque geometry: it is drawn at the far plane
+  and depth tested, so it only lands on pixels nothing else covered - and the
+  depth test rejects the rest before the fragment shader ever runs for them.
+  Pushed first, it would shade every pixel on screen only to be painted over.
+
+  Uses whichever camera command came before it, like a model draw does.
+*/
+struct render_command_draw_skybox
+{
+    render_command_header Header;
+    texture_handle Cubemap;
+};
+
+/*
+  Everything after this draws into the shadow map, from the sun, until the
+  next BeginScene switches back.  Push the models that should CAST shadows
+  between the two, with RenderProgram_Shadow.
+
+  Carries the sun's camera as one matrix - view and projection already
+  multiplied - because nothing needs them separately.
+*/
+struct render_command_shadow_pass
+{
+    render_command_header Header;
+    mat4 LightSpace;
 };
 
 /*
@@ -144,15 +242,6 @@ struct render_command_lighting
 
     render_point_light PointLights[4];
     uint32 PointLightCount;
-
-    vec3 SpotAmbient;
-    vec3 SpotDiffuse;
-    vec3 SpotSpecular;
-    real32 SpotConstant;
-    real32 SpotLinear;
-    real32 SpotQuadratic;
-    real32 SpotCutOff;          // cosines, not angles
-    real32 SpotOuterCutOff;
 };
 
 struct render_command_draw_model
@@ -168,6 +257,7 @@ struct render_command_draw_model
 
     mat4 Transform;
     render_program Program;
+    stencil_mode Stencil;
 };
 
 /*
@@ -280,6 +370,60 @@ PushClear(render_buffer *Buffer, vec4 Color)
 }
 
 internal void
+PushBeginScene(render_buffer *Buffer, int32 Width, int32 Height)
+{
+    render_command_begin_scene *Command =
+        PushRenderCommand(Buffer, render_command_begin_scene, RenderCommand_BeginScene);
+
+    if(Command)
+    {
+        Command->Width = Width;
+        Command->Height = Height;
+    }
+}
+
+internal void
+PushEndScene(render_buffer *Buffer, real32 Exposure)
+{
+    render_command_end_scene *Command = 
+        PushRenderCommand(Buffer, render_command_end_scene, RenderCommand_EndScene);
+    if(Command)
+    {
+        Command->Exposure = Exposure;
+    }
+}
+
+internal void
+PushSkybox(render_buffer *Buffer, texture_handle Cubemap)
+{
+    // A sky that failed to load draws nothing, rather than a black cube.
+    if(!Cubemap.Value)
+    {
+        return;
+    }
+
+    render_command_draw_skybox *Command =
+        PushRenderCommand(Buffer, render_command_draw_skybox, RenderCommand_DrawSkybox);
+
+    if(Command)
+    {
+        Command->Cubemap = Cubemap;
+    }
+}
+
+internal void
+PushShadowPass(render_buffer *Buffer, mat4 LightSpace)
+{
+    render_command_shadow_pass *Command =
+        PushRenderCommand(Buffer, render_command_shadow_pass, RenderCommand_ShadowPass);
+
+    if(Command)
+    {
+        Command->LightSpace = LightSpace;
+    }
+}
+
+internal void
 PushCamera(render_buffer *Buffer, mat4 View, mat4 Projection)
 {
     render_command_camera *Command =
@@ -314,7 +458,7 @@ PushLighting(render_buffer *Buffer)
 
 internal void
 PushModel(render_buffer *Buffer, render_model *Model, mat4 Transform,
-          render_program Program)
+          render_program Program, stencil_mode Stencil)
 {
     if(!Model || !Model->IndexCount)
     {
@@ -329,6 +473,7 @@ PushModel(render_buffer *Buffer, render_model *Model, mat4 Transform,
         Command->Model = Model;
         Command->Transform = Transform;
         Command->Program = Program;
+        Command->Stencil = Stencil;
     }
 }
 

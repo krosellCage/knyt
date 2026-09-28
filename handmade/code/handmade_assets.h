@@ -33,7 +33,7 @@
 */
 internal texture_handle
 GameLoadTexture(thread_context *Thread, game_memory *Memory, renderer *Renderer,
-                const char *FileName, texture_wrap Wrap)
+                const char *FileName, texture_wrap Wrap, texture_encoding Encoding)
 {
     texture_handle Result = {};
 
@@ -66,7 +66,7 @@ GameLoadTexture(thread_context *Thread, game_memory *Memory, renderer *Renderer,
         // and without them that shimmers as the camera moves.
         Result = RendererUploadTexture(Renderer, Pixels,
                                        (uint32)Width, (uint32)Height, (uint32)ChannelCount,
-                                       Wrap, TextureFilter_LinearMipmap);
+                                       Wrap, TextureFilter_LinearMipmap, Encoding);
 
         stbi_image_free(Pixels);
     }
@@ -76,6 +76,116 @@ GameLoadTexture(thread_context *Thread, game_memory *Memory, renderer *Renderer,
         Memory->DEBUGPlatformLog(Thread, FileName);
         Memory->DEBUGPlatformLog(Thread, "\n");
     }
+
+    return(Result);
+}
+
+/*
+  Reads a sky laid out as a horizontal cross - a 4x3 grid of square faces,
+  with six of the twelve cells used - and hands it to the GPU as a cube map.
+
+        [    ][ +Y ][    ][    ]        +Y = up         -Y = down
+        [ -X ][ +Z ][ +X ][ -Z ]        the middle row runs all the way round
+        [    ][ -Y ][    ][    ]        the horizon, left to right
+
+  NOTE(yigit): Each face is COPIED out into its own packed block, because the
+  upload wants one face per pointer and a face's rows are not next to each
+  other in the cross - between one row of +Z and the next sit the matching
+  rows of -X, +X and -Z.
+
+  Arena is scratch and gets RESET on entry, like GameLoadModel's.
+*/
+internal texture_handle
+GameLoadCubemapCross(thread_context *Thread, game_memory *Memory, renderer *Renderer,
+                     memory_arena *Arena, const char *FileName)
+{
+    texture_handle Result = {};
+
+    ResetArena(Arena);
+
+    debug_read_file_result File = Memory->DEBUGPlatformReadEntireFile(Thread, FileName);
+    if(!File.Contents)
+    {
+        Memory->DEBUGPlatformLog(Thread, "ERROR: Failed to read cube map file: ");
+        Memory->DEBUGPlatformLog(Thread, FileName);
+        Memory->DEBUGPlatformLog(Thread, "\n");
+        return(Result);
+    }
+
+    // NOTE(yigit): NOT flipped, unlike every other texture - see the note on
+    // RendererUploadCubemap.  Must be said explicitly: this is a global in stb,
+    // so the 1 GameLoadTexture last set would otherwise still be in force.
+    stbi_set_flip_vertically_on_load(0);
+
+    int32 Width, Height, ChannelCount;
+    uint8 *Pixels = stbi_load_from_memory((const uint8 *)File.Contents, (int32)File.ContentsSize,
+                                          &Width, &Height, &ChannelCount, 0);
+    Memory->DEBUGPlatformFreeFileMemory(Thread, File.Contents);
+
+    if(!Pixels)
+    {
+        Memory->DEBUGPlatformLog(Thread, "ERROR: Failed to decode cube map: ");
+        Memory->DEBUGPlatformLog(Thread, FileName);
+        Memory->DEBUGPlatformLog(Thread, "\n");
+        return(Result);
+    }
+
+    int32 FaceSize = Width / 4;
+    if((Width != FaceSize*4) || (Height != FaceSize*3))
+    {
+        Memory->DEBUGPlatformLog(Thread, "ERROR: Cube map is not a 4x3 cross: ");
+        Memory->DEBUGPlatformLog(Thread, FileName);
+        Memory->DEBUGPlatformLog(Thread, "\n");
+        stbi_image_free(Pixels);
+        return(Result);
+    }
+
+    // Grid cell (column, row) of each face, in OpenGL's order +X -X +Y -Y +Z -Z.
+    int32 FaceCells[6][2] =
+    {
+        {2, 1},     // +X
+        {0, 1},     // -X
+        {1, 0},     // +Y
+        {1, 2},     // -Y
+        {1, 1},     // +Z
+        {3, 1},     // -Z
+    };
+
+    memory_index SourcePitch = (memory_index)Width * ChannelCount;
+    memory_index FacePitch = (memory_index)FaceSize * ChannelCount;
+
+    uint8 *Faces[6];
+    for(uint32 FaceIndex = 0;
+        FaceIndex < 6;
+        ++FaceIndex)
+    {
+        Faces[FaceIndex] = PushArray(Arena, FacePitch*FaceSize, uint8);
+
+        // Top-left pixel of this face's cell in the cross.
+        uint8 *Source = Pixels +
+                        (memory_index)(FaceCells[FaceIndex][1]*FaceSize)*SourcePitch +
+                        (memory_index)(FaceCells[FaceIndex][0]*FaceSize)*ChannelCount;
+        uint8 *Dest = Faces[FaceIndex];
+
+        for(int32 Y = 0;
+            Y < FaceSize;
+            ++Y)
+        {
+            for(memory_index Byte = 0;
+                Byte < FacePitch;
+                ++Byte)
+            {
+                Dest[Byte] = Source[Byte];
+            }
+
+            Dest += FacePitch;
+            Source += SourcePitch;
+        }
+    }
+
+    Result = RendererUploadCubemap(Renderer, Faces, (uint32)FaceSize, (uint32)ChannelCount);
+
+    stbi_image_free(Pixels);
 
     return(Result);
 }
@@ -188,7 +298,14 @@ GameLoadFont(thread_context *Thread, game_memory *Memory, renderer *Renderer,
         Memory->DEBUGPlatformLog(Thread, "\n");
         return(Result);
     }
+    // stb starts packing glyphs at (1,1) and leaves pixel (0,0) empty.
+    // Make it fully covered, so solid rectangles have something to sample.
+    Bitmap[0] = 255;
 
+    // Its CENTRE, not its corner: at the corner, linear filtering would
+    // average in the black pixels next to it.
+    Result.WhiteU = 0.5f / (real32)AtlasDim;
+    Result.WhiteV = 0.5f / (real32)AtlasDim;
     // Ask stb where each glyph sits relative to a pen at the origin, once, and
     // keep the answer.  Doing this per character per frame would call into
     // stb_truetype for every letter drawn.
@@ -221,9 +338,11 @@ GameLoadFont(thread_context *Thread, game_memory *Memory, renderer *Renderer,
     // one glyph'''s border would otherwise bleed in a sliver of whatever sits on
     // the far side of the atlas.  And no mipmaps, because text is drawn at 1:1
     // and never minified, so they would cost memory and never be sampled.
+    // Linear, because coverage is data - see texture_encoding.
     Result.Texture = RendererUploadTexture(Renderer, Bitmap, AtlasDim, AtlasDim, 1,
                                            TextureWrap_ClampToEdge,
-                                           TextureFilter_Linear);
+                                           TextureFilter_Linear,
+                                           TextureEncoding_Linear);
 
     return(Result);
 }
@@ -232,25 +351,32 @@ GameLoadFont(thread_context *Thread, game_memory *Memory, renderer *Renderer,
 // earlier submesh named the same file.
 //
 // NOTE(yigit): The submeshes built so far ARE the cache - a linear scan over a
-// few dozen of them, cheaper than any structure built to avoid it.  It checks
-// BOTH name fields, because one material's diffuse map can be another
-// material's alpha mask, and uploading it twice would be silent waste.
+// few dozen of them, cheaper than any structure built to avoid it.
+//
+// A hit must match the ENCODING as well as the name.  Diffuse maps are
+// uploaded sRGB and alpha masks linear, so one file used as both is two
+// different textures on the GPU - handing a mask the sRGB copy would move its
+// cutout edges.  So a diffuse request only searches diffuse maps, and a mask
+// request only searches masks.
 internal texture_handle
 GameLoadMaterialTexture(thread_context *Thread, game_memory *Memory, renderer *Renderer,
                         const char *ObjFileName, const char *MapName,
+                        texture_encoding Encoding,
                         render_submesh *Submeshes, uint32 SubmeshCount)
 {
     for(uint32 I = 0; I < SubmeshCount; ++I)
     {
         render_submesh *Other = Submeshes + I;
 
-        if(IsValidHandle(Other->DiffuseTexture) &&
+        if((Encoding == TextureEncoding_SRGB) &&
+           IsValidHandle(Other->DiffuseTexture) &&
            ObjNamesMatch2(Other->Material.DiffuseMapName, MapName))
         {
             return(Other->DiffuseTexture);
         }
 
-        if(IsValidHandle(Other->AlphaTexture) &&
+        if((Encoding == TextureEncoding_Linear) &&
+           IsValidHandle(Other->AlphaTexture) &&
            ObjNamesMatch2(Other->Material.AlphaMapName, MapName))
         {
             return(Other->AlphaTexture);
@@ -261,11 +387,11 @@ GameLoadMaterialTexture(thread_context *Thread, game_memory *Memory, renderer *R
     ObjMakeSiblingFileName(TextureFileName, sizeof(TextureFileName), ObjFileName, MapName);
 
     return(GameLoadTexture(Thread, Memory, Renderer, TextureFileName,
-                           TextureWrap_Repeat));
+                           TextureWrap_Repeat, Encoding));
 }
 
 // Reads an OBJ, de-duplicates it into a vertex/index pair, and hands both to
-// the GPU.  Chapters 18-20 of the book, without Assimp.
+// the GPU.
 //
 // NOTE(yigit): Arena is scratch and gets RESET on entry, so the caller must
 // not keep anything in it.  A real model needs hundreds of megabytes to parse
@@ -357,17 +483,22 @@ GameLoadModel(thread_context *Thread, game_memory *Memory, renderer *Renderer,
 
         if(Submesh->Material.HasDiffuseMap)
         {
+            // A colour an artist painted, so sRGB.
             Submesh->DiffuseTexture =
                 GameLoadMaterialTexture(Thread, Memory, Renderer, FileName,
                                         Submesh->Material.DiffuseMapName,
+                                        TextureEncoding_SRGB,
                                         Result.Submeshes, Result.SubmeshCount - 1);
         }
 
         if(Submesh->Material.HasAlphaMap)
         {
+            // A mask is data, so linear - decoded as sRGB, every cutout edge
+            // would move.
             Submesh->AlphaTexture =
                 GameLoadMaterialTexture(Thread, Memory, Renderer, FileName,
                                         Submesh->Material.AlphaMapName,
+                                        TextureEncoding_Linear,
                                         Result.Submeshes, Result.SubmeshCount - 1);
         }
     }

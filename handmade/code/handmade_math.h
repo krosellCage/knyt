@@ -316,7 +316,7 @@ Cross(vec3 A, vec3 B)
 
 // -------------------------------------------------------------------------
 // View matrix from a camera position, a point to look at, and which way is up.
-// The equivalent of glm::lookAt (book ch. 10.2).
+// The equivalent of glm::lookAt.
 //
 // It builds two things and multiplies them: a rotation whose ROWS are the
 // camera's own axes, and a translation by -Eye.  Rows rather than columns

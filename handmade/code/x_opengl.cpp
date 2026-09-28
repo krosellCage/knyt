@@ -254,8 +254,33 @@ XInitOpenGL(x_opengl_context *Context, Display *ClientDisplay, Window ClientWind
     GL->glDisable                 = (PFNGLDISABLEPROC)                XGLGetProcAddress("glDisable", &AllLoaded);
     GL->glBlendFunc               = (PFNGLBLENDFUNCPROC)              XGLGetProcAddress("glBlendFunc", &AllLoaded);
     GL->glDepthMask               = (PFNGLDEPTHMASKPROC)              XGLGetProcAddress("glDepthMask", &AllLoaded);
+    GL->glDepthFunc               = (PFNGLDEPTHFUNCPROC)              XGLGetProcAddress("glDepthFunc", &AllLoaded);
+    GL->glCullFace                = (PFNGLCULLFACEPROC)               XGLGetProcAddress("glCullFace", &AllLoaded);
+    GL->glFrontFace               = (PFNGLFRONTFACEPROC)              XGLGetProcAddress("glFrontFace", &AllLoaded);
+    GL->glStencilFunc             = (PFNGLSTENCILFUNCPROC)            XGLGetProcAddress("glStencilFunc", &AllLoaded);
+    GL->glStencilOp               = (PFNGLSTENCILOPPROC)              XGLGetProcAddress("glStencilOp", &AllLoaded);
+    GL->glStencilMask             = (PFNGLSTENCILMASKPROC)            XGLGetProcAddress("glStencilMask", &AllLoaded);
+    GL->glGetIntegerv             = (PFNGLGETINTEGERVPROC)            XGLGetProcAddress("glGetIntegerv", &AllLoaded);
+    GL->glGetFramebufferAttachmentParameteriv = (PFNGLGETFRAMEBUFFERATTACHMENTPARAMETERIVPROC) XGLGetProcAddress("glGetFramebufferAttachmentParameteriv", &AllLoaded);
+
+    // Framebuffer objects
+    GL->glGenFramebuffers         = (PFNGLGENFRAMEBUFFERSPROC)        XGLGetProcAddress("glGenFramebuffers", &AllLoaded);
+    GL->glBindFramebuffer         = (PFNGLBINDFRAMEBUFFERPROC)        XGLGetProcAddress("glBindFramebuffer", &AllLoaded);
+    GL->glDeleteFramebuffers      = (PFNGLDELETEFRAMEBUFFERSPROC)     XGLGetProcAddress("glDeleteFramebuffers", &AllLoaded);
+    GL->glCheckFramebufferStatus  = (PFNGLCHECKFRAMEBUFFERSTATUSPROC) XGLGetProcAddress("glCheckFramebufferStatus", &AllLoaded);
+    GL->glFramebufferTexture2D    = (PFNGLFRAMEBUFFERTEXTURE2DPROC)   XGLGetProcAddress("glFramebufferTexture2D", &AllLoaded);
+    GL->glGenRenderbuffers        = (PFNGLGENRENDERBUFFERSPROC)       XGLGetProcAddress("glGenRenderbuffers", &AllLoaded);
+    GL->glBindRenderbuffer        = (PFNGLBINDRENDERBUFFERPROC)       XGLGetProcAddress("glBindRenderbuffer", &AllLoaded);
+    GL->glDeleteRenderbuffers     = (PFNGLDELETERENDERBUFFERSPROC)    XGLGetProcAddress("glDeleteRenderbuffers", &AllLoaded);
+    GL->glRenderbufferStorage     = (PFNGLRENDERBUFFERSTORAGEPROC)    XGLGetProcAddress("glRenderbufferStorage", &AllLoaded);
+    GL->glFramebufferRenderbuffer = (PFNGLFRAMEBUFFERRENDERBUFFERPROC)XGLGetProcAddress("glFramebufferRenderbuffer", &AllLoaded);
+    GL->glBlitFramebuffer         = (PFNGLBLITFRAMEBUFFERPROC)        XGLGetProcAddress("glBlitFramebuffer", &AllLoaded);
+    GL->glViewport                = (PFNGLVIEWPORTPROC)               XGLGetProcAddress("glViewport", &AllLoaded);
+
     GL->glClearColor              = (PFNGLCLEARCOLORPROC)             XGLGetProcAddress("glClearColor", &AllLoaded);
     GL->glClear                   = (PFNGLCLEARPROC)                  XGLGetProcAddress("glClear", &AllLoaded);
+    GL->glDrawBuffer              = (PFNGLDRAWBUFFERPROC)             XGLGetProcAddress("glDrawBuffer", &AllLoaded);
+    GL->glReadBuffer              = (PFNGLREADBUFFERPROC)             XGLGetProcAddress("glReadBuffer", &AllLoaded);
     GL->glDrawArrays              = (PFNGLDRAWARRAYSPROC)             XGLGetProcAddress("glDrawArrays", &AllLoaded);
     GL->glDrawElements            = (PFNGLDRAWELEMENTSPROC)           XGLGetProcAddress("glDrawElements", &AllLoaded);
 

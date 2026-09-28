@@ -47,12 +47,154 @@ typedef unsigned int   GLbitfield;
 #define GL_STATIC_DRAW              0x88E4
 #define GL_DYNAMIC_DRAW             0x88E8
 
-// Book ch. 25 - blending.  SRC_ALPHA / ONE_MINUS_SRC_ALPHA is the standard
+/*
+  The depth comparison, the test glDepthFunc picks.  The fragment
+  is kept when "incoming depth COMPARISON stored depth" is true.
+
+  NOTE(yigit): GL_LESS is the default, and is the one that draws a normal scene
+  - a nearer fragment replaces a farther one.  The others are worth trying
+  once: GL_ALWAYS keeps every fragment and so behaves as
+  though there were no depth buffer at all, which is a good way to SEE what the
+  depth test was doing for you.
+*/
+#define GL_NEVER                    0x0200
+#define GL_LESS                     0x0201
+#define GL_EQUAL                    0x0202
+#define GL_LEQUAL                   0x0203
+#define GL_GREATER                  0x0204
+#define GL_NOTEQUAL                 0x0205
+#define GL_GEQUAL                   0x0206
+#define GL_ALWAYS                   0x0207
+
+/*
+  Stencil testing.  The stencil buffer is one extra byte per
+  pixel that fragments can be tested against and can write into, which is what
+  makes "draw only where I have NOT already drawn" expressible - outlines,
+  portals, mirrors.
+
+  The comparison functions are the same eight as above; these are the ACTIONS,
+  what happens to the stored value in each of three outcomes (stencil fails,
+  stencil passes but depth fails, both pass).
+
+  NOTE(yigit): The mask is easy to lose an afternoon to.  glStencilMask(0x00)
+  makes every write a no-op while leaving the TEST working, so a pass that
+  seems to write nothing is usually a mask left at zero by the pass before it.
+*/
+#define GL_STENCIL_TEST             0x0B90
+#define GL_STENCIL_BUFFER_BIT       0x00000400
+
+/*
+  How many bits the framebuffer actually GOT, which is not necessarily what the
+  pixel format asked for.  Queried at startup so a context without a stencil
+  buffer is reported rather than discovered through a technique that silently
+  does nothing.
+
+  NOTE(yigit): NOT glGetIntegerv(GL_STENCIL_BITS).  That is OpenGL 1.x state
+  and 3.2 core REMOVED it - on a core context the call raises GL_INVALID_ENUM,
+  leaves the output variable untouched, and so reports zero stencil bits on a
+  framebuffer that has eight.  A check that fails on a working setup is worse
+  than no check at all.
+
+  The replacement asks the framebuffer about one of its attachments.  For the
+  DEFAULT framebuffer the attachment names are GL_STENCIL and GL_DEPTH, not the
+  GL_STENCIL_ATTACHMENT spelling that a framebuffer object would use.
+*/
+#define GL_FRAMEBUFFER                          0x8D40
+#define GL_DEPTH                                0x1801
+#define GL_STENCIL                              0x1802
+#define GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE    0x8216
+#define GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE  0x8217
+
+/*
+  Framebuffer objects - drawing into a texture instead of the window.
+
+  A framebuffer is an empty container.  It becomes drawable once things are
+  ATTACHED to it: a colour attachment (usually a texture, so a later pass can
+  sample what was drawn) and a depth/stencil attachment (usually a
+  renderbuffer, which is faster but cannot be sampled).  Binding framebuffer 0
+  goes back to drawing into the window.
+
+  GL_FRAMEBUFFER binds for both reading and drawing; the READ/DRAW pair split
+  those, which glBlitFramebuffer needs.
+*/
+#define GL_READ_FRAMEBUFFER                     0x8CA8
+#define GL_DRAW_FRAMEBUFFER                     0x8CA9
+#define GL_RENDERBUFFER                         0x8D41
+
+#define GL_COLOR_ATTACHMENT0                    0x8CE0
+#define GL_DEPTH_ATTACHMENT                     0x8D00
+#define GL_STENCIL_ATTACHMENT                   0x8D20
+#define GL_DEPTH_STENCIL_ATTACHMENT             0x821A
+
+// Depth and stencil packed into one 32-bit value: 24 bits depth, 8 stencil.
+#define GL_DEPTH24_STENCIL8                     0x88F0
+
+// Depth-only textures: one number per pixel, the distance to the nearest
+// surface.  The shadow map is one of these.
+#define GL_DEPTH_COMPONENT                      0x1902
+#define GL_DEPTH_COMPONENT24                    0x81A6
+
+// "No buffer" - for glDrawBuffer/glReadBuffer on a framebuffer that has no
+// colour attachment at all, like the shadow map's.
+#define GL_NONE                                 0
+#define GL_DEPTH_STENCIL                        0x84F9
+#define GL_UNSIGNED_INT_24_8                    0x84FA
+
+/*
+  What glCheckFramebufferStatus returns.  Anything but COMPLETE means draws
+  into this framebuffer do nothing - no error, just a black result.
+
+  NOTE(yigit): The failure codes are here so a debugger shows which one came
+  back instead of a bare number.  The usual beginner one is
+  INCOMPLETE_MISSING_ATTACHMENT: the framebuffer was checked before anything
+  was attached to it.
+*/
+#define GL_FRAMEBUFFER_COMPLETE                        0x8CD5
+#define GL_FRAMEBUFFER_UNDEFINED                       0x8219
+#define GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT           0x8CD6
+#define GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT   0x8CD7
+#define GL_FRAMEBUFFER_INCOMPLETE_DRAW_BUFFER          0x8CDB
+#define GL_FRAMEBUFFER_INCOMPLETE_READ_BUFFER          0x8CDC
+#define GL_FRAMEBUFFER_UNSUPPORTED                     0x8CDD
+#define GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE          0x8D56
+
+#define GL_KEEP                     0x1E00
+#define GL_ZERO                     0
+#define GL_REPLACE                  0x1E01
+#define GL_INCR                     0x1E02
+#define GL_DECR                     0x1E03
+#define GL_INVERT                   0x150A
+#define GL_INCR_WRAP                0x8507
+#define GL_DECR_WRAP                0x8508
+
+/*
+  Face culling.  A triangle's front is the side from which its corners go
+  round counter-clockwise on screen (GL_CCW, the default).  With GL_CULL_FACE
+  on, the faces glCullFace names are thrown away before any fragment is shaded
+  - GL_BACK by default, which for a closed mesh is the half you could never see
+  anyway.
+
+  NOTE(yigit): A model wound the other way round does not look darker or
+  inside-out when culling is on - it disappears, or shows only its far side.
+  cube.obj is wound counter-clockwise from outside, so it is safe.
+*/
+#define GL_CULL_FACE                0x0B44
+#define GL_FRONT                    0x0404
+#define GL_BACK                     0x0405
+#define GL_FRONT_AND_BACK           0x0408
+#define GL_CW                       0x0900
+#define GL_CCW                      0x0901
+
+// Blending.  SRC_ALPHA / ONE_MINUS_SRC_ALPHA is the standard
 // "over" operator: the incoming fragment contributes its own alpha, and what
 // is already in the framebuffer contributes the rest.
 #define GL_BLEND                    0x0BE2
 #define GL_SRC_ALPHA                0x0302
 #define GL_ONE_MINUS_SRC_ALPHA      0x0303
+// Blend factor 1: "take this colour as it is".  ONE, ONE blending is plain
+// addition - new colour + colour already there - which is how the bloom
+// levels are stacked on top of each other.
+#define GL_ONE                      1
 #define GL_VERTEX_SHADER            0x8B31
 #define GL_FRAGMENT_SHADER          0x8B30
 #define GL_COMPILE_STATUS           0x8B81
@@ -62,7 +204,7 @@ typedef unsigned int   GLbitfield;
 #define GL_ELEMENT_ARRAY_BUFFER     0x8893
 #define GL_DEBUG_OUTPUT_SYNCHRONOUS 0x8242
 
-// Textures (book ch. 7)
+// Textures
 #define GL_TEXTURE_2D               0x0DE1
 // NOTE(yigit): Texture unit selectors for glActiveTexture.  They are
 // consecutive, so GL_TEXTURE0 + n works for any unit and these are only here
@@ -97,6 +239,29 @@ typedef unsigned int   GLbitfield;
 #define GL_RGB                      0x1907
 #define GL_RGBA                     0x1908
 #define GL_UNSIGNED_BYTE            0x1401
+/*
+  Cube maps - six square textures used as the faces of a cube, sampled with a
+  DIRECTION instead of a UV.  The GPU picks the face the direction points at,
+  and the spot on that face.  What a sky is: a picture of everything that is
+  infinitely far away, in every direction.
+
+  NOTE(yigit): The six face targets are consecutive, in the order +X -X +Y -Y
+  +Z -Z, so POSITIVE_X + n is face n.
+
+  SEAMLESS makes the filter blend across the edge between two faces instead of
+  clamping at it.  Core since 3.2 but OFF by default, and without it every
+  cube edge shows as a faint line in the sky.
+*/
+#define GL_TEXTURE_CUBE_MAP                 0x8513
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_X      0x8515
+#define GL_TEXTURE_WRAP_R                   0x8072
+#define GL_TEXTURE_CUBE_MAP_SEAMLESS        0x884F
+
+// A float format: 16 bits per channel, so values can go above 1.0.
+// This is what makes a texture "HDR".
+#define GL_RGBA16F                  0x881A
+#define GL_SRGB8                    0x8C41
+#define GL_SRGB8_ALPHA8             0x8C43
 // NOTE(yigit): Row alignment for pixel uploads.  The default is 4, which makes
 // OpenGL assume every row starts on a 4-byte boundary and pad the stride to
 // suit.  Decoders hand back tightly packed rows, so for any 3-channel image
@@ -169,8 +334,35 @@ typedef void   (GLAPIENTRY *PFNGLENABLEPROC)                   (GLenum cap);
 typedef void   (GLAPIENTRY *PFNGLDISABLEPROC)                  (GLenum cap);
 typedef void   (GLAPIENTRY *PFNGLBLENDFUNCPROC)                (GLenum sfactor, GLenum dfactor);
 typedef void   (GLAPIENTRY *PFNGLDEPTHMASKPROC)                (GLboolean flag);
+typedef void   (GLAPIENTRY *PFNGLDEPTHFUNCPROC)                (GLenum func);
+typedef void   (GLAPIENTRY *PFNGLCULLFACEPROC)                 (GLenum mode);
+typedef void   (GLAPIENTRY *PFNGLFRONTFACEPROC)                (GLenum mode);
+typedef void   (GLAPIENTRY *PFNGLSTENCILFUNCPROC)              (GLenum func, GLint ref, GLuint mask);
+typedef void   (GLAPIENTRY *PFNGLSTENCILOPPROC)                (GLenum sfail, GLenum dpfail, GLenum dppass);
+typedef void   (GLAPIENTRY *PFNGLSTENCILMASKPROC)              (GLuint mask);
+typedef void   (GLAPIENTRY *PFNGLGETINTEGERVPROC)              (GLenum pname, GLint *data);
+typedef void   (GLAPIENTRY *PFNGLGETFRAMEBUFFERATTACHMENTPARAMETERIVPROC)(GLenum target, GLenum attachment, GLenum pname, GLint *params);
+
+// Framebuffer objects
+typedef void   (GLAPIENTRY *PFNGLGENFRAMEBUFFERSPROC)          (GLsizei n, GLuint *framebuffers);
+typedef void   (GLAPIENTRY *PFNGLBINDFRAMEBUFFERPROC)          (GLenum target, GLuint framebuffer);
+typedef void   (GLAPIENTRY *PFNGLDELETEFRAMEBUFFERSPROC)       (GLsizei n, const GLuint *framebuffers);
+typedef GLenum (GLAPIENTRY *PFNGLCHECKFRAMEBUFFERSTATUSPROC)   (GLenum target);
+typedef void   (GLAPIENTRY *PFNGLFRAMEBUFFERTEXTURE2DPROC)     (GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
+typedef void   (GLAPIENTRY *PFNGLGENRENDERBUFFERSPROC)         (GLsizei n, GLuint *renderbuffers);
+typedef void   (GLAPIENTRY *PFNGLBINDRENDERBUFFERPROC)         (GLenum target, GLuint renderbuffer);
+typedef void   (GLAPIENTRY *PFNGLDELETERENDERBUFFERSPROC)      (GLsizei n, const GLuint *renderbuffers);
+typedef void   (GLAPIENTRY *PFNGLRENDERBUFFERSTORAGEPROC)      (GLenum target, GLenum internalformat, GLsizei width, GLsizei height);
+typedef void   (GLAPIENTRY *PFNGLFRAMEBUFFERRENDERBUFFERPROC)  (GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer);
+typedef void   (GLAPIENTRY *PFNGLBLITFRAMEBUFFERPROC)          (GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter);
+typedef void   (GLAPIENTRY *PFNGLVIEWPORTPROC)                 (GLint x, GLint y, GLsizei width, GLsizei height);
 typedef void   (GLAPIENTRY *PFNGLCLEARCOLORPROC)               (GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
 typedef void   (GLAPIENTRY *PFNGLCLEARPROC)                    (GLbitfield mask);
+// NOTE(yigit): Which colour attachment draws and reads go to.  A framebuffer
+// with NO colour attachment has to be told GL_NONE for both - in 3.3 the
+// default, COLOR_ATTACHMENT0, pointing at nothing makes it incomplete.
+typedef void   (GLAPIENTRY *PFNGLDRAWBUFFERPROC)               (GLenum buf);
+typedef void   (GLAPIENTRY *PFNGLREADBUFFERPROC)               (GLenum src);
 typedef void   (GLAPIENTRY *PFNGLDRAWARRAYSPROC)               (GLenum mode, GLint first, GLsizei count);
 typedef void   (GLAPIENTRY *PFNGLDRAWELEMENTSPROC)             (GLenum mode, GLsizei count, GLenum type, const void *indices);
 
@@ -232,8 +424,35 @@ typedef struct game_opengl_api
     PFNGLDISABLEPROC                 glDisable;
     PFNGLBLENDFUNCPROC               glBlendFunc;
     PFNGLDEPTHMASKPROC               glDepthMask;
+    PFNGLDEPTHFUNCPROC               glDepthFunc;
+    PFNGLCULLFACEPROC                glCullFace;
+    PFNGLFRONTFACEPROC               glFrontFace;
+    PFNGLSTENCILFUNCPROC             glStencilFunc;
+    PFNGLSTENCILOPPROC               glStencilOp;
+    PFNGLSTENCILMASKPROC             glStencilMask;
+    PFNGLGETINTEGERVPROC             glGetIntegerv;
+    PFNGLGETFRAMEBUFFERATTACHMENTPARAMETERIVPROC glGetFramebufferAttachmentParameteriv;
+
+    // Framebuffer objects.  glViewport is here because a framebuffer that is
+    // not the window's size needs the viewport changed to match while drawing
+    // into it, and changed back afterwards.
+    PFNGLGENFRAMEBUFFERSPROC         glGenFramebuffers;
+    PFNGLBINDFRAMEBUFFERPROC         glBindFramebuffer;
+    PFNGLDELETEFRAMEBUFFERSPROC      glDeleteFramebuffers;
+    PFNGLCHECKFRAMEBUFFERSTATUSPROC  glCheckFramebufferStatus;
+    PFNGLFRAMEBUFFERTEXTURE2DPROC    glFramebufferTexture2D;
+    PFNGLGENRENDERBUFFERSPROC        glGenRenderbuffers;
+    PFNGLBINDRENDERBUFFERPROC        glBindRenderbuffer;
+    PFNGLDELETERENDERBUFFERSPROC     glDeleteRenderbuffers;
+    PFNGLRENDERBUFFERSTORAGEPROC     glRenderbufferStorage;
+    PFNGLFRAMEBUFFERRENDERBUFFERPROC glFramebufferRenderbuffer;
+    PFNGLBLITFRAMEBUFFERPROC         glBlitFramebuffer;
+    PFNGLVIEWPORTPROC                glViewport;
+
     PFNGLCLEARCOLORPROC              glClearColor;
     PFNGLCLEARPROC                   glClear;
+    PFNGLDRAWBUFFERPROC              glDrawBuffer;
+    PFNGLREADBUFFERPROC              glReadBuffer;
     PFNGLDRAWARRAYSPROC              glDrawArrays;
     PFNGLDRAWELEMENTSPROC            glDrawElements;
 } game_opengl_api;

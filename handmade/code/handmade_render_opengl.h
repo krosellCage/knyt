@@ -73,14 +73,7 @@ struct lit_program_locations
     int32 DirDiffuse;
     int32 DirSpecular;
 
-    int32 SpotAmbient;
-    int32 SpotDiffuse;
-    int32 SpotSpecular;
-    int32 SpotConstant;
-    int32 SpotLinear;
-    int32 SpotQuadratic;
-    int32 SpotCutOff;
-    int32 SpotOuterCutOff;
+    int32 PointLightCount;
 
     int32 MaterialDiffuse;
     int32 MaterialSpecular;
@@ -118,7 +111,17 @@ struct overlay_program_locations
 
 #define RENDERER_MAX_MESHES           64
 #define RENDERER_MAX_TEXTURES         256
+
+// How many times bloom halves the image.  Six takes 1920x1080 down to 30x16,
+// about as small as is still useful.  More levels = a wider glow.
+#define BLOOM_MIP_COUNT               6
 #define RENDERER_MAX_OVERLAY_BUFFERS  4
+
+// The shadow map's size, in pixels, on each side.  Bigger = sharper shadow
+// edges, at the cost of memory and fill time: 2048x2048 of 24-bit depth is
+// 12 MB.  It is fixed, not the window's size - it covers the SCENE, from the
+// sun, and has nothing to do with the window.
+#define SHADOW_MAP_SIZE               2048
 
 struct renderer
 {
@@ -177,7 +180,145 @@ struct renderer
     */
     mat4 CurrentView;
     mat4 CurrentProjection;
+
+    // The HDR target.  The 3D scene draws into this instead of the window.
+    uint32 HDRFramebuffer;      // the container
+    uint32 HDRColor;            // a texture: where the colours go
+    uint32 HDRDepthStencil;     // a renderbuffer: where depth + stencil go
+    int32 HDRWidth;             // the size they were created at, so we can
+    int32 HDRHeight;            // tell when the window has been resized
+
+    // Bound for any fullscreen triangle.  It describes no vertex data at all -
+    // the vertex shader builds the corners from gl_VertexID - but core profile
+    // refuses to draw with no VAO bound.
+    uint32 FullscreenVAO;
+
+    // The bloom chain: the HDR image at half size, quarter size, and so on.
+    // One framebuffer, reused for every level - each pass attaches whichever
+    // texture it wants to draw into.
+    uint32 BloomFramebuffer;
+    uint32 BloomMips[BLOOM_MIP_COUNT];
+    int32 BloomMipWidth[BLOOM_MIP_COUNT];
+    int32 BloomMipHeight[BLOOM_MIP_COUNT];
+
+    // The sun's view of the scene: depth only.  Drawn first every frame.
+    uint32 ShadowFramebuffer;
+    uint32 ShadowDepth;             // depth texture - the shadow map itself
+
+    // The sun camera's view and projection multiplied together.  The shadow
+    // pass draws WITH it; the lit shader later uses the same matrix to find
+    // where each pixel lands in the shadow map.  Kept here, like CurrentView,
+    // because the command that sets it and the one that uses it are different.
+    mat4 LightSpace;
 };
+
+/*
+  Creates the HDR target at this size, or does nothing if it is already
+  that size.  Called every frame; only does work on the first frame and
+  when the window is resized.
+*/
+internal void
+RendererResizeHDRTarget(renderer *Renderer, int32 Width, int32 Height)
+{
+    // A minimised window reports 0x0.  A 0x0 texture is an error.
+    if((Width <= 0) || (Height <= 0))
+    {
+        return;
+    }
+
+    if((Width == Renderer->HDRWidth) && (Height == Renderer->HDRHeight))
+    {
+        return;
+    }
+
+    game_opengl_api *GL = Renderer->GL;
+
+    // Throw away the old ones.  All three ignore 0, so this is safe on the
+    // very first call when nothing exists yet.
+    GL->glDeleteFramebuffers(1, &Renderer->HDRFramebuffer);
+    GL->glDeleteTextures(1, &Renderer->HDRColor);
+    GL->glDeleteRenderbuffers(1, &Renderer->HDRDepthStencil);
+
+    // 1. The colour texture.
+    GL->glGenTextures(1, &Renderer->HDRColor);
+    GL->glBindTexture(GL_TEXTURE_2D, Renderer->HDRColor);
+
+    // Last argument 0 = no pixel data, just reserve the memory.  The GPU will
+    // fill it when we draw.
+    GL->glTexImage2D(GL_TEXTURE_2D, 0, (int32)GL_RGBA16F, Width, Height, 0,
+                     GL_RGBA, GL_FLOAT, 0);
+
+    // NOTE: MIN_FILTER must be set.  The default expects mipmaps, this texture
+    // has none, and a texture missing mipmaps it was told to expect reads as
+    // pure black - with no error anywhere.
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    // 2. The depth + stencil renderbuffer.  Same 24/8 split the window has.
+    GL->glGenRenderbuffers(1, &Renderer->HDRDepthStencil);
+    GL->glBindRenderbuffer(GL_RENDERBUFFER, Renderer->HDRDepthStencil);
+    GL->glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, Width, Height);
+
+    // 3. The box, with both attached.
+    GL->glGenFramebuffers(1, &Renderer->HDRFramebuffer);
+    GL->glBindFramebuffer(GL_FRAMEBUFFER, Renderer->HDRFramebuffer);
+    GL->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, Renderer->HDRColor, 0);
+    GL->glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT,
+                                  GL_RENDERBUFFER, Renderer->HDRDepthStencil);
+
+    // Anything but COMPLETE means every draw into it silently does nothing.
+    // If this fires, look at Status in the debugger and compare it against
+    // the GL_FRAMEBUFFER_INCOMPLETE_* codes in handmade_opengl.h.
+    uint32 Status = GL->glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    Assert(Status == GL_FRAMEBUFFER_COMPLETE);
+
+    // 4. The bloom chain.  Each level half the size of the one before.
+    //    Remade on every resize, like the HDR texture it is shrunk from.
+    GL->glDeleteTextures(BLOOM_MIP_COUNT, Renderer->BloomMips);
+
+    int32 MipWidth = Width;
+    int32 MipHeight = Height;
+    for(uint32 Mip = 0;
+        Mip < BLOOM_MIP_COUNT;
+        ++Mip)
+    {
+        // Never below 1x1, or a tiny window would ask for a 0-pixel texture.
+        MipWidth  = (MipWidth  > 1) ? (MipWidth  / 2) : 1;
+        MipHeight = (MipHeight > 1) ? (MipHeight / 2) : 1;
+
+        Renderer->BloomMipWidth[Mip]  = MipWidth;
+        Renderer->BloomMipHeight[Mip] = MipHeight;
+
+        GL->glGenTextures(1, &Renderer->BloomMips[Mip]);
+        GL->glBindTexture(GL_TEXTURE_2D, Renderer->BloomMips[Mip]);
+
+        // Float, same as the HDR texture: the whole point is to keep the
+        // difference between "bright" and "twenty times brighter".
+        GL->glTexImage2D(GL_TEXTURE_2D, 0, (int32)GL_RGBA16F, MipWidth, MipHeight, 0,
+                         GL_RGBA, GL_FLOAT, 0);
+
+        // NOTE: LINEAR is not optional.  The bloom shaders read BETWEEN
+        // pixels on purpose, and linear filtering averages the four around
+        // each read for free - that is half of the blur.
+        GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+
+    // Made once and never resized - it owns nothing, only whatever texture
+    // is attached to it at the moment.
+    if(!Renderer->BloomFramebuffer)
+    {
+        GL->glGenFramebuffers(1, &Renderer->BloomFramebuffer);
+    }
+
+    Renderer->HDRWidth = Width;
+    Renderer->HDRHeight = Height;
+}
 
 // Turning a handle back into the thing it names.  Both return a zeroed result
 // for an invalid handle rather than asserting, so a model that failed to load
@@ -236,7 +377,8 @@ RendererGetTexture(renderer *Renderer, texture_handle Handle)
 internal texture_handle
 RendererUploadTexture(renderer *Renderer, uint8 *Pixels,
                       uint32 Width, uint32 Height, uint32 ChannelCount,
-                      texture_wrap Wrap, texture_filter Filter)
+                      texture_wrap Wrap, texture_filter Filter,
+                      texture_encoding Encoding)
 {
     game_opengl_api *GL = Renderer->GL;
     texture_handle Result = {};
@@ -255,6 +397,17 @@ RendererUploadTexture(renderer *Renderer, uint8 *Pixels,
         case 2: { Format = GL_RG; } break;
         case 3: { Format = GL_RGB; } break;
         case 4: { Format = GL_RGBA; } break;
+    }
+    // NOTE: TWO formats now, and until today they happened to be the same.
+    //   Format         - what the bytes in Pixels ARE (GL_RGB: 3 bytes each).
+    //   InternalFormat - what the GPU should STORE them as.
+    // An sRGB texture's bytes are identical; only the storage format tells
+    // the GPU to decode on every read.
+    uint32 InternalFormat = Format;
+    if(Encoding == TextureEncoding_SRGB)
+    {
+        if(ChannelCount == 3) { InternalFormat = GL_SRGB8; }
+        if(ChannelCount == 4) { InternalFormat = GL_SRGB8_ALPHA8; }
     }
 
     uint32 GLWrap = (Wrap == TextureWrap_ClampToEdge) ? GL_CLAMP_TO_EDGE : GL_REPEAT;
@@ -276,7 +429,7 @@ RendererUploadTexture(renderer *Renderer, uint8 *Pixels,
     GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, MinFilter);
     GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
-    GL->glTexImage2D(GL_TEXTURE_2D, 0, (int32)Format, (int32)Width, (int32)Height, 0,
+    GL->glTexImage2D(GL_TEXTURE_2D, 0, (int32)InternalFormat, (int32)Width, (int32)Height, 0,
                      Format, GL_UNSIGNED_BYTE, Pixels);
 
     if(WantMipmaps)
@@ -285,6 +438,64 @@ RendererUploadTexture(renderer *Renderer, uint8 *Pixels,
     }
 
     // Plus one, so a zeroed handle reads as "nothing".
+    Renderer->Textures[Renderer->TextureCount++] = Texture;
+    Result.Value = Renderer->TextureCount;
+
+    return(Result);
+}
+
+/*
+  Six square faces become one cube map.  Faces[] is in OpenGL's face order,
+  +X -X +Y -Y +Z -Z, each tightly packed and top row first.
+
+  NOTE(yigit): Top row first is the OPPOSITE of what RendererUploadTexture
+  wants.  Cube maps do not follow the bottom-left origin of 2D textures - the
+  face layout was fixed by RenderMan long before OpenGL, and it puts each
+  face's first row at the top.  So the caller must NOT flip these.
+
+  The handle goes in the same table as 2D textures.  Which target to bind it
+  to is up to whoever draws with it, the same as for any texture.
+*/
+internal texture_handle
+RendererUploadCubemap(renderer *Renderer, uint8 **Faces,
+                      uint32 FaceSize, uint32 ChannelCount)
+{
+    game_opengl_api *GL = Renderer->GL;
+    texture_handle Result = {};
+
+    if(Renderer->TextureCount >= RENDERER_MAX_TEXTURES)
+    {
+        return(Result);
+    }
+
+    uint32 Format = (ChannelCount == 4) ? GL_RGBA : GL_RGB;
+
+    // A sky is always a colour, so always sRGB.  See texture_encoding.
+    uint32 InternalFormat = (ChannelCount == 4) ? GL_SRGB8_ALPHA8 : GL_SRGB8;
+
+    uint32 Texture = 0;
+    GL->glGenTextures(1, &Texture);
+    GL->glBindTexture(GL_TEXTURE_CUBE_MAP, Texture);
+    GL->glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+    for(uint32 FaceIndex = 0;
+        FaceIndex < 6;
+        ++FaceIndex)
+    {
+        GL->glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + FaceIndex, 0, (int32)InternalFormat,
+                         (int32)FaceSize, (int32)FaceSize, 0,
+                         Format, GL_UNSIGNED_BYTE, Faces[FaceIndex]);
+    }
+
+    // No mipmaps: the sky is always the same distance away, so it is never
+    // shrunk.  CLAMP_TO_EDGE on all THREE axes - R is the third one a cube
+    // map has - so no face ever wraps around and samples its opposite edge.
+    GL->glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    GL->glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    GL->glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    GL->glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    GL->glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
     Renderer->Textures[Renderer->TextureCount++] = Texture;
     Result.Value = Renderer->TextureCount;
 
@@ -367,10 +578,58 @@ RendererCreateWhiteTexture(renderer *Renderer)
 {
     uint8 White[4] = {255, 255, 255, 255};
 
+    // Linear: white is 1.0 under either encoding, and a placeholder is not a
+    // colour anyone chose.
     return(RendererUploadTexture(Renderer, White, 1, 1, 4,
-                                 TextureWrap_Repeat, TextureFilter_Linear));
+                                 TextureWrap_Repeat, TextureFilter_Linear,
+                                 TextureEncoding_Linear));
 }
 
+/*
+  Creates the shadow map: a depth texture and a framebuffer that draws into
+  it.  Once, at startup - the size is fixed, so a window resize never
+  touches it.
+*/
+internal void
+RendererCreateShadowMap(renderer *Renderer)
+{
+    game_opengl_api *GL = Renderer->GL;
+
+    // 1. The depth texture.  DEPTH_COMPONENT24: one 24-bit depth per pixel,
+    //    the same precision as the scene's own depth buffer.
+    GL->glGenTextures(1, &Renderer->ShadowDepth);
+    GL->glBindTexture(GL_TEXTURE_2D, Renderer->ShadowDepth);
+    GL->glTexImage2D(GL_TEXTURE_2D, 0, (int32)GL_DEPTH_COMPONENT24,
+                     SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0,
+                     GL_DEPTH_COMPONENT, GL_FLOAT, 0);
+
+    // NEAREST, not LINEAR.  These are distances, and averaging the distance
+    // to a roof with the distance to the floor below it gives a distance to
+    // nothing at all.  Softening happens in the shader instead (E8).
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    // 2. The framebuffer, with ONLY a depth attachment.
+    GL->glGenFramebuffers(1, &Renderer->ShadowFramebuffer);
+    GL->glBindFramebuffer(GL_FRAMEBUFFER, Renderer->ShadowFramebuffer);
+    GL->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                               GL_TEXTURE_2D, Renderer->ShadowDepth, 0);
+
+    // NOTE: No colour attachment, so say so.  By default a framebuffer draws
+    // colour into COLOR_ATTACHMENT0, and in GL 3.3 pointing at an attachment
+    // that does not exist makes the whole framebuffer incomplete.
+    GL->glDrawBuffer(GL_NONE);
+    GL->glReadBuffer(GL_NONE);
+
+    uint32 Status = GL->glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    Assert(Status == GL_FRAMEBUFFER_COMPLETE);
+
+    // Back to the window, so nothing after this draws into the shadow map
+    // by accident.
+    GL->glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
 
 /*
   Allocates and sets up the backend.  Called once.
@@ -391,6 +650,26 @@ RendererInitialize(game_memory *Memory, memory_arena *Arena)
     // back faces draw over the front ones in whatever order they happen to be
     // listed, and objects look turned inside out.
     Result->GL->glEnable(GL_DEPTH_TEST);
+    Result->GL->glEnable(GL_STENCIL_TEST);
+    Result->GL->glDepthFunc(GL_LESS);
+    Result->GL->glEnable(GL_CULL_FACE);  
+    Result->GL->glCullFace(GL_BACK);
+    /*
+      NOTE(yigit): Asking the pixel format for stencil bits is a
+      REQUEST, and a context can come back without them - at which point every
+      stencil call still succeeds, glGetError stays clean, the test behaves as
+      though it always passes, and the outline simply never appears.  There is
+      nothing to find by reading the code, because the code is correct.
+
+      So the assumption is checked once, here, and stated out loud.  This is
+      also the one place that would catch a pixel format changed by hand, or a
+      driver that quietly declined the request.
+    */
+    int32 StencilBits = 0;
+    Result->GL->glGetFramebufferAttachmentParameteriv(
+        GL_FRAMEBUFFER, GL_STENCIL,
+        GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE, &StencilBits);
+    Assert(StencilBits >= 8);
 
     // NOTE(yigit): Starts at 1, not 0.  A cache that has never looked anything
     // up holds generation 0, so the first frame always refreshes.
@@ -399,6 +678,13 @@ RendererInitialize(game_memory *Memory, memory_arena *Arena)
     // See the note on the fields - identity, not the zeros PushStruct leaves.
     Result->CurrentView = Mat4Identity();
     Result->CurrentProjection = Mat4Identity();
+
+    // See the note on GL_TEXTURE_CUBE_MAP_SEAMLESS.  Global, not per texture.
+    Result->GL->glEnable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
+
+    Result->GL->glGenVertexArrays(1, &Result->FullscreenVAO);
+
+    RendererCreateShadowMap(Result);
 
     Result->WhiteTexture = RendererCreateWhiteTexture(Result);
 
@@ -477,6 +763,60 @@ RendererUpdateShaders(renderer *Renderer, thread_context *Thread, game_memory *M
 }
 
 
+/*
+  Puts the stencil state in place for one draw.  See stencil_mode
+  for what each mode is for.
+
+  The three calls, in plain words:
+    glStencilFunc(test, ref, mask) - which pixels may be drawn: "compare the
+                                     stored value to ref using test".
+    glStencilOp(fail, zfail, pass) - what to store afterwards, for a pixel that
+                                     failed the stencil test, failed the depth
+                                     test, or passed both.
+    glStencilMask(bits)            - which bits may be written at all.  0x00
+                                     turns writing off entirely.
+
+  NOTE(yigit): Every mode sets all three.  Stencil state is global and sticks
+  until changed, so a mode that set only one would inherit the other two from
+  whatever drew last - and the mask left at 0x00 by an outline would then
+  silently stop the next frame's clear from clearing.
+*/
+internal void
+SetStencilMode(game_opengl_api *GL, stencil_mode Mode)
+{
+    switch(Mode)
+    {
+        case StencilMode_Off:
+        {
+            // Every pixel passes, nothing is written.
+            GL->glStencilFunc(GL_ALWAYS, 0, 0xFF);
+            GL->glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+            GL->glStencilMask(0xFF);
+        } break;
+
+        case StencilMode_Write:
+        {
+            // Every pixel passes, and each one that ends up visible (passes
+            // the depth test too) stores a 1.
+            GL->glStencilFunc(GL_ALWAYS, 1, 0xFF);
+            GL->glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+            GL->glStencilMask(0xFF);
+        } break;
+
+        case StencilMode_Outside:
+        {
+            // Only pixels whose stored value is NOT 1 pass - that is, pixels
+            // outside the object drawn with StencilMode_Write.  Nothing is
+            // written, so the mark stays intact for the next outline.
+            GL->glStencilFunc(GL_NOTEQUAL, 1, 0xFF);
+            GL->glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+            GL->glStencilMask(0x00);
+        } break;
+
+        InvalidDefaultCase;
+    }
+}
+
 // Draws one loaded model, a submesh at a time, setting that submesh's material
 // before each call.
 //
@@ -485,7 +825,7 @@ RendererUpdateShaders(renderer *Renderer, thread_context *Thread, game_memory *M
 // which is the whole reason the index buffer was reordered by material.
 internal void
 GameDrawModel(renderer *Renderer, uint32 Program, render_model *Model,
-              mat4 ModelMatrix)
+              mat4 ModelMatrix, stencil_mode Stencil)
 {
     game_opengl_api *GL = Renderer->GL;
 
@@ -504,6 +844,7 @@ GameDrawModel(renderer *Renderer, uint32 Program, render_model *Model,
     // happen before any of them - and it replaces the glUseProgram the
     // name-based setters used to do on every single write.
     GL->glUseProgram(Program);
+    SetStencilMode(GL, Stencil);
     GL->glBindVertexArray(Mesh->VAO);
 
     // NOTE(yigit): Hoisted out of the loop.  A uniform's location is fixed for
@@ -585,14 +926,7 @@ RefreshLitLocations(renderer *Renderer)
     L->DirDiffuse   = GetUniformLocation(GL, Program, "dirLight.diffuse");
     L->DirSpecular  = GetUniformLocation(GL, Program, "dirLight.specular");
 
-    L->SpotAmbient      = GetUniformLocation(GL, Program, "spotLight.ambient");
-    L->SpotDiffuse      = GetUniformLocation(GL, Program, "spotLight.diffuse");
-    L->SpotSpecular     = GetUniformLocation(GL, Program, "spotLight.specular");
-    L->SpotConstant     = GetUniformLocation(GL, Program, "spotLight.constant");
-    L->SpotLinear       = GetUniformLocation(GL, Program, "spotLight.linear");
-    L->SpotQuadratic    = GetUniformLocation(GL, Program, "spotLight.quadratic");
-    L->SpotCutOff       = GetUniformLocation(GL, Program, "spotLight.cutOff");
-    L->SpotOuterCutOff  = GetUniformLocation(GL, Program, "spotLight.outerCutOff");
+    L->PointLightCount = GetUniformLocation(GL, Program, "pointLightCount");
 
     L->MaterialDiffuse   = GetUniformLocation(GL, Program, "material.diffuse");
     L->MaterialSpecular  = GetUniformLocation(GL, Program, "material.specular");
@@ -655,9 +989,18 @@ SetCameraUniforms(renderer *Renderer, render_command_camera *Camera)
 
     // By NAME rather than by cached location, and it rebinds the program on its
     // own - so this has to come after the At-setters above, not before.
+    //
+    // NOTE(yigit): Every 3D program needs its own copy of these.  A program
+    // added later and forgotten here is invisible until it draws, and then its
+    // geometry sits at the origin in a way that looks like a bad model rather
+    // than a missing uniform.
     uint32 Lamp = Renderer->Programs[RenderProgram_Lamp];
     SetUniformMat4(GL, Lamp, "view", Camera->View);
     SetUniformMat4(GL, Lamp, "projection", Camera->Projection);
+
+    uint32 Outline = Renderer->Programs[RenderProgram_Outline];
+    SetUniformMat4(GL, Outline, "view", Camera->View);
+    SetUniformMat4(GL, Outline, "projection", Camera->Projection);
 }
 
 /*
@@ -686,22 +1029,6 @@ SetLitUniforms(renderer *Renderer, render_command_lighting *Lighting)
     // LAMP program bound.
     GL->glUseProgram(Renderer->Programs[RenderProgram_Lit]);
 
-    // The SPOTLIGHT - the flashlight held at the camera.  It needs no position
-    // or direction uniform: in view space the camera is the origin looking down
-    // -Z, so the shader has both as constants.
-    SetUniformVec3At(GL, L->SpotAmbient,  Lighting->SpotAmbient);
-    SetUniformVec3At(GL, L->SpotDiffuse,  Lighting->SpotDiffuse);
-    SetUniformVec3At(GL, L->SpotSpecular, Lighting->SpotSpecular);
-
-    SetUniformFloatAt(GL, L->SpotConstant,  Lighting->SpotConstant);
-    SetUniformFloatAt(GL, L->SpotLinear,    Lighting->SpotLinear);
-    SetUniformFloatAt(GL, L->SpotQuadratic, Lighting->SpotQuadratic);
-
-    // Already cosines by the time they arrive - the scene converts from degrees
-    // once, rather than this doing it every frame.
-    SetUniformFloatAt(GL, L->SpotCutOff,      Lighting->SpotCutOff);
-    SetUniformFloatAt(GL, L->SpotOuterCutOff, Lighting->SpotOuterCutOff);
-
     // NOTE(yigit): W is 0, not 1.  A direction has no location, so the view
     // matrix's translation column must not touch it.
     vec4 DirView = View * Vec4(Lighting->DirLightDirectionWorld, 0.0f);
@@ -720,6 +1047,11 @@ SetLitUniforms(renderer *Renderer, render_command_lighting *Lighting)
     {
         LightCount = ArrayCount(L->PointLights);
     }
+
+    // The shader loops over exactly this many - see the note on
+    // pointLightCount in fragmentShader.frag for why it cannot loop over all
+    // four and let the unused ones contribute nothing.
+    SetUniformIntAt(GL, L->PointLightCount, (int32)LightCount);
 
     for(uint32 Index = 0; Index < LightCount; ++Index)
     {
@@ -745,6 +1077,21 @@ SetLitUniforms(renderer *Renderer, render_command_lighting *Lighting)
     SetUniformIntAt(GL, L->MaterialDiffuse, 0);
     SetUniformIntAt(GL, L->MaterialSpecular, 1);
     SetUniformIntAt(GL, L->MaterialAlphaMask, 2);
+
+    // The shadow map, and the matrix that finds each pixel in it - the same
+    // one the shadow pass drew with, kept from the ShadowPass command.
+    //
+    // NOTE(yigit): Texture unit 3.  GameDrawModel rebinds units 0, 1 and 2
+    // for every submesh (diffuse, specular, alpha mask), so a shadow map on
+    // any of those would be replaced before the first draw.  Nothing else in
+    // the frame touches unit 3, so binding it once here is enough.
+    uint32 Lit = Renderer->Programs[RenderProgram_Lit];
+    SetUniformMat4(GL, Lit, "lightSpace", Renderer->LightSpace);
+    SetUniformInt(GL, Lit, "shadowMap", 3);
+
+    GL->glActiveTexture(GL_TEXTURE3);
+    GL->glBindTexture(GL_TEXTURE_2D, Renderer->ShadowDepth);
+    GL->glActiveTexture(GL_TEXTURE0);
 }
 
 // NOTE(yigit): Only the colour.  View and projection are the camera's, and go
@@ -752,9 +1099,10 @@ SetLitUniforms(renderer *Renderer, render_command_lighting *Lighting)
 internal void
 SetLampUniforms(game_opengl_api *GL, uint32 Program, render_command_lighting *Lighting)
 {
-    // Book ch. 14.4 exercise 1 - the marker takes the light's own colour, so
-    // the lamp visibly matches what it is casting.
-    SetUniformVec4(GL, Program, "LightColor", Lighting->SpotSpecular, 1.0f);
+    // White.  It used to take the flashlight's colour, and there is no
+    // flashlight any more - nor any lamp drawn with this program, but it is
+    // kept for whenever point lights come back.
+    SetUniformVec4(GL, Program, "LightColor", Vec3(1.0f, 1.0f, 1.0f), 1.0f);
 }
 
 /*
@@ -798,7 +1146,13 @@ RendererCreateOverlayBuffer(renderer *Renderer)
     GL->glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(overlay_vertex),
                               (void *)(2 * sizeof(real32)));
     GL->glEnableVertexAttribArray(1);
-
+    GL->glVertexAttribPointer(2,                          // attribute number 2 (the shader's "location = 2")
+            4,                          // it is 4 floats (vec4: r, g, b, a)
+            GL_FLOAT, GL_FALSE,
+            sizeof(overlay_vertex),     // 32 bytes from one vertex to the next
+            (void *)(4 * sizeof(real32)));  // it starts 16 bytes into each vertex:
+                                            // after Position (2 floats) + TexCoord (2 floats)
+    GL->glEnableVertexAttribArray(2);
     GL->glBindVertexArray(0);
 
     ++Renderer->OverlayBufferCount;
@@ -880,14 +1234,154 @@ RendererDrawOverlay(renderer *Renderer, overlay *Overlay, mat4 Projection,
     // the next frame.  Turning off only the test would still write.
     GL->glDisable(GL_DEPTH_TEST);
     GL->glDepthMask(GL_FALSE);
+    SetStencilMode(GL, StencilMode_Off);
+
+    // NOTE(yigit): Culling off for the 2D pass.  The overlay projection flips
+    // Y so that it grows downward, and flipping one axis reverses the winding
+    // of every triangle - quads that are counter-clockwise in pixel space come
+    // out CLOCKWISE on screen, which is a back face, and every glyph is culled.
+    // A flat overlay has no back to hide, so there is nothing to cull anyway.
+    GL->glDisable(GL_CULL_FACE);
 
     GL->glBindVertexArray(Buffer->VAO);
     GL->glDrawArrays(GL_TRIANGLES, 0, (int32)Overlay->VertexCount);
     GL->glBindVertexArray(0);
 
+    GL->glEnable(GL_CULL_FACE);
     GL->glDepthMask(GL_TRUE);
     GL->glEnable(GL_DEPTH_TEST);
     GL->glDisable(GL_BLEND);
+}
+
+/*
+  Draws the sky behind everything already in the depth buffer.
+
+  NOTE(yigit): No cube mesh.  One fullscreen triangle, pinned to the far
+  plane, and the vertex shader works out which DIRECTION each corner of the
+  screen is looking in by running the camera matrices backwards.  The
+  fragment shader samples the cube map with that direction.  A cube mesh
+  would have to be kept centred on the camera and drawn inside-out; this
+  has no geometry to get wrong.
+
+  Depth test stays ON, so the sky only lands where nothing else did - but
+  with LEQUAL rather than LESS.  The triangle sits at depth exactly 1.0,
+  which is also what an untouched pixel was cleared to, and 1.0 < 1.0 is
+  false: under LESS the sky would fail everywhere and draw nothing at all.
+*/
+internal void
+RendererDrawSkybox(renderer *Renderer, texture_handle Cubemap)
+{
+    game_opengl_api *GL = Renderer->GL;
+
+    uint32 Program = Renderer->Programs[RenderProgram_Skybox];
+    GL->glUseProgram(Program);
+
+    SetUniformMat4(GL, Program, "view", Renderer->CurrentView);
+    SetUniformMat4(GL, Program, "projection", Renderer->CurrentProjection);
+    SetUniformInt(GL, Program, "sky", 0);
+
+    GL->glActiveTexture(GL_TEXTURE0);
+    GL->glBindTexture(GL_TEXTURE_CUBE_MAP, RendererGetTexture(Renderer, Cubemap));
+
+    // Depth WRITE off as well: the sky is infinitely far away, and nothing
+    // drawn after it should ever be hidden behind it.
+    GL->glDepthFunc(GL_LEQUAL);
+    GL->glDepthMask(GL_FALSE);
+    SetStencilMode(GL, StencilMode_Off);
+
+    GL->glBindVertexArray(Renderer->FullscreenVAO);
+    GL->glDrawArrays(GL_TRIANGLES, 0, 3);
+    GL->glBindVertexArray(0);
+
+    GL->glDepthMask(GL_TRUE);
+    GL->glDepthFunc(GL_LESS);
+}
+
+/*
+  Blurs the HDR image into BloomMips[0], for the tonemap pass to mix in.
+
+  Down: HDR -> mip 0 -> mip 1 -> ... -> the smallest, each half the size.
+  Up:   the smallest -> ... -> mip 0, each ADDED on top of the level above.
+
+  NOTE(yigit): A texture must never be read while it is the one being drawn
+  into - the result is undefined, and in practice garbage.  Every pass here
+  reads one level and writes a DIFFERENT one, which is why the chain is
+  separate textures rather than one texture read and written in place.
+
+  Expects depth and stencil testing already off - see RenderCommand_EndScene.
+*/
+internal void
+RendererRenderBloom(renderer *Renderer)
+{
+    game_opengl_api *GL = Renderer->GL;
+
+    GL->glBindFramebuffer(GL_FRAMEBUFFER, Renderer->BloomFramebuffer);
+    GL->glBindVertexArray(Renderer->FullscreenVAO);
+    GL->glActiveTexture(GL_TEXTURE0);
+
+    // ---- Down ------------------------------------------------------------
+    uint32 Down = Renderer->Programs[RenderProgram_BloomDown];
+    GL->glUseProgram(Down);
+    SetUniformInt(GL, Down, "srcTexture", 0);
+
+    // The first level reads the HDR image itself.
+    uint32 Source = Renderer->HDRColor;
+    int32 SourceWidth = Renderer->HDRWidth;
+    int32 SourceHeight = Renderer->HDRHeight;
+
+    for(uint32 Mip = 0;
+        Mip < BLOOM_MIP_COUNT;
+        ++Mip)
+    {
+        // Draw into this level...
+        GL->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                   GL_TEXTURE_2D, Renderer->BloomMips[Mip], 0);
+        GL->glViewport(0, 0, Renderer->BloomMipWidth[Mip], Renderer->BloomMipHeight[Mip]);
+
+        // ...reading the one above it.
+        SetUniformVec2(GL, Down, "srcTexelSize",
+                       1.0f / (real32)SourceWidth, 1.0f / (real32)SourceHeight);
+        GL->glBindTexture(GL_TEXTURE_2D, Source);
+
+        GL->glDrawArrays(GL_TRIANGLES, 0, 3);
+
+        // What was just drawn is the next level's source.
+        Source = Renderer->BloomMips[Mip];
+        SourceWidth = Renderer->BloomMipWidth[Mip];
+        SourceHeight = Renderer->BloomMipHeight[Mip];
+    }
+
+    // ---- Up --------------------------------------------------------------
+    uint32 Up = Renderer->Programs[RenderProgram_BloomUp];
+    GL->glUseProgram(Up);
+    SetUniformInt(GL, Up, "srcTexture", 0);
+    SetUniformFloat(GL, Up, "filterRadius", 0.005f);
+
+    // ADD, don't replace: new * 1 + existing * 1.  Each bigger level keeps
+    // its own blur and gains the wider blur from below.
+    GL->glEnable(GL_BLEND);
+    GL->glBlendFunc(GL_ONE, GL_ONE);
+
+    // NOTE(yigit): Signed, because it counts DOWN.  An unsigned counter would
+    // wrap from 0 to four billion instead of going negative, and "Mip > 0"
+    // would then be true forever.
+    for(int32 Mip = BLOOM_MIP_COUNT - 1;
+        Mip > 0;
+        --Mip)
+    {
+        // Read this level, draw into the next bigger one.
+        GL->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                   GL_TEXTURE_2D, Renderer->BloomMips[Mip - 1], 0);
+        GL->glViewport(0, 0, Renderer->BloomMipWidth[Mip - 1], Renderer->BloomMipHeight[Mip - 1]);
+
+        GL->glBindTexture(GL_TEXTURE_2D, Renderer->BloomMips[Mip]);
+        GL->glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
+
+    // Blending is global state.  Left on, it would leak into the next
+    // frame's 3D pass and every draw would add onto the last.
+    GL->glDisable(GL_BLEND);
+    GL->glBindVertexArray(0);
 }
 
 /*
@@ -912,12 +1406,81 @@ RenderBufferExecute(renderer *Renderer, render_buffer *Buffer)
 
         switch(Header->Type)
         {
+            case RenderCommand_BeginScene:
+                {
+                    // The shadow pass turned it off.
+                    GL->glEnable(GL_CULL_FACE);
+
+                    render_command_begin_scene *Command = (render_command_begin_scene *)Header;
+
+                    RendererResizeHDRTarget(Renderer, Command->Width, Command->Height);
+
+                    // From here on, every draw lands in our texture, not the window.
+                    GL->glBindFramebuffer(GL_FRAMEBUFFER, Renderer->HDRFramebuffer);
+                    GL->glViewport(0, 0, Command->Width, Command->Height);
+                } break;
+
+            case RenderCommand_EndScene:
+                {
+                    // NOTE: Every pass from here on is a fullscreen triangle
+                    // that must never be rejected - bloom's as well as the
+                    // tonemap's.  Depth test off: the window's depth buffer is
+                    // never cleared any more, so it holds garbage.  Stencil
+                    // off: the lamp outlines leave stencil state behind.
+                    
+                    render_command_end_scene *Command = (render_command_end_scene *)Header;
+                    GL->glDisable(GL_DEPTH_TEST);
+                    SetStencilMode(GL, StencilMode_Off);
+
+                    // Blur the HDR image into Renderer->BloomMips[0].
+                    RendererRenderBloom(Renderer);
+
+                    // Into the window.  The viewport MUST be set again here:
+                    // bloom left it at the size of its last level.
+                    GL->glBindFramebuffer(GL_FRAMEBUFFER, 0);
+                    GL->glViewport(0, 0, Renderer->HDRWidth, Renderer->HDRHeight);
+
+                    uint32 Program = Renderer->Programs[RenderProgram_Tonemap];
+                    GL->glUseProgram(Program);
+
+                    // Two textures now, so two texture units: the sharp HDR
+                    // image on 0, the blurred one on 1.
+                    GL->glActiveTexture(GL_TEXTURE0);
+                    GL->glBindTexture(GL_TEXTURE_2D, Renderer->HDRColor);
+                    SetUniformInt(GL, Program, "hdrScene", 0);
+
+                    GL->glActiveTexture(GL_TEXTURE1);
+                    GL->glBindTexture(GL_TEXTURE_2D, Renderer->BloomMips[0]);
+                    SetUniformInt(GL, Program, "bloomTexture", 1);
+
+                    // Back to unit 0, which every other draw assumes is the
+                    // active one.
+                    GL->glActiveTexture(GL_TEXTURE0);
+
+                    SetUniformFloat(GL, Program, "exposure", Command->Exposure);
+                    SetUniformFloat(GL, Program, "bloomStrength", 0.04f);
+
+                    // Three vertices, no buffer: the vertex shader makes them up.
+                    GL->glBindVertexArray(Renderer->FullscreenVAO);
+                    GL->glDrawArrays(GL_TRIANGLES, 0, 3);
+                    GL->glBindVertexArray(0);
+
+                    // Put back what the 3D pass expects next frame.
+                    GL->glEnable(GL_DEPTH_TEST);
+                } break;
             case RenderCommand_Clear:
             {
                 render_command_clear *Command = (render_command_clear *)Header;
                 GL->glClearColor(Command->Color.X, Command->Color.Y,
                                  Command->Color.Z, Command->Color.W);
-                GL->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+                // NOTE(yigit): glClear obeys the write masks - a buffer whose
+                // mask is off is silently NOT cleared.  So both are turned back
+                // on first, whatever the last frame left them at.
+                GL->glDepthMask(GL_TRUE);
+                GL->glStencilMask(0xFF);
+                GL->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
+                            GL_STENCIL_BUFFER_BIT);
             } break;
             case RenderCommand_Camera:
             {
@@ -943,7 +1506,8 @@ RenderBufferExecute(renderer *Renderer, render_buffer *Buffer)
                 render_command_draw_model *Command = (render_command_draw_model *)Header;
 
                 uint32 Program = Renderer->Programs[Command->Program];
-                GameDrawModel(Renderer, Program, Command->Model, Command->Transform);
+                GameDrawModel(Renderer, Program, Command->Model,
+                              Command->Transform, Command->Stencil);
             } break;
 
             case RenderCommand_DrawOverlay:
@@ -954,6 +1518,44 @@ RenderBufferExecute(renderer *Renderer, render_buffer *Buffer)
                                     Command->Font ? Command->Font->Texture
                                                   : Renderer->WhiteTexture,
                                     Command->Color);
+            } break;
+
+            case RenderCommand_DrawSkybox:
+            {
+                render_command_draw_skybox *Command = (render_command_draw_skybox *)Header;
+
+                RendererDrawSkybox(Renderer, Command->Cubemap);
+            } break;
+
+            case RenderCommand_ShadowPass:
+            {
+                render_command_shadow_pass *Command = (render_command_shadow_pass *)Header;
+
+                // Kept for the lit pass, which needs the same matrix to look
+                // things up in the map this pass is about to draw.
+                Renderer->LightSpace = Command->LightSpace;
+
+                GL->glBindFramebuffer(GL_FRAMEBUFFER, Renderer->ShadowFramebuffer);
+                GL->glViewport(0, 0, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
+
+                // Clear to the farthest possible depth: "the sun sees nothing".
+                // Depth mask on first - glClear obeys it (see the Clear case).
+                GL->glDepthMask(GL_TRUE);
+                GL->glClear(GL_DEPTH_BUFFER_BIT);
+
+                // NOTE: Culling OFF for the shadow pass.  Sponza is full of
+                // one-sided surfaces - leaves, curtains, cloth - and with back
+                // faces culled, any of them turned away from the sun would
+                // cast no shadow at all.  BeginScene turns it back on.
+                GL->glDisable(GL_CULL_FACE);
+
+                uint32 Shadow = Renderer->Programs[RenderProgram_Shadow];
+                SetUniformMat4(GL, Shadow, "lightSpace", Command->LightSpace);
+
+                // For the alpha test in shadow.frag: the units GameDrawModel
+                // binds each submesh's diffuse map and alpha mask to.
+                SetUniformInt(GL, Shadow, "diffuseMap", 0);
+                SetUniformInt(GL, Shadow, "alphaMask", 2);
             } break;
 
             // NOTE(yigit): A command nothing handles is a bug, not something to

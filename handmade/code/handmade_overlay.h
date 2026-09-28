@@ -23,12 +23,13 @@
 #define OVERLAY_MAX_QUADS 4096
 #define OVERLAY_MAX_VERTICES (6 * OVERLAY_MAX_QUADS)
 
-// 16 bytes.  Position is in PIXELS, not clip space - Mat4Ortho does that
+// 32 bytes.  Position is in PIXELS, not clip space - Mat4Ortho does that
 // conversion, so callers think in screen coordinates throughout.
 struct overlay_vertex
 {
     vec2 Position;
     vec2 TexCoord;
+    vec4 Color;
 };
 
 // ASCII 32 (space) through 126 (~).  Everything a debug overlay needs, and it
@@ -60,6 +61,8 @@ struct loaded_font
     texture_handle Texture;     // single channel: coverage, not colour
     font_glyph Glyphs[FONT_CHAR_COUNT];
     real32 LineHeight;
+    real32 WhiteU;
+    real32 WhiteV;
 };
 
 struct overlay
@@ -91,11 +94,12 @@ OverlayReset(overlay *Overlay)
 // One axis-aligned rectangle at (X, Y) with size (W, H), in pixels, sampling
 // the sub-rectangle (U0,V0)..(U1,V1) of whatever texture is bound at flush.
 //
-// Wound counter-clockwise, matching the rest of the renderer, so this still
-// works if face culling is ever turned on.
+// Counter-clockwise in PIXEL space - but the overlay projection flips Y, so on
+// screen these come out clockwise.  RendererDrawOverlay turns culling off for
+// that reason.
 internal void
 OverlayPushQuad(overlay *Overlay, real32 X, real32 Y, real32 W, real32 H,
-                real32 U0, real32 V0, real32 U1, real32 V1)
+                real32 U0, real32 V0, real32 U1, real32 V1, vec4 Color)
 {
     // Dropping the quad is the right failure here.  Growing would mean a
     // reallocation mid-frame and a buffer the GPU is already looking at.
@@ -117,6 +121,22 @@ OverlayPushQuad(overlay *Overlay, real32 X, real32 Y, real32 W, real32 H,
     V[3].Position = Vec2(X,  Y ); V[3].TexCoord = Vec2(U0, V0);
     V[4].Position = Vec2(X1, Y1); V[4].TexCoord = Vec2(U1, V1);
     V[5].Position = Vec2(X,  Y1); V[5].TexCoord = Vec2(U0, V1);
+
+    for (int ColorIndex = 0; ColorIndex < 6; ColorIndex++)
+    {
+        V[ColorIndex].Color = Color;
+    }
+}
+
+// A solid rectangle.  Every corner samples the font atlas's one white pixel,
+// so the whole quad has full coverage and shows Color alone.
+internal void
+OverlayPushRect(overlay *Overlay, loaded_font *Font,
+                real32 X, real32 Y, real32 W, real32 H, vec4 Color)
+{
+    OverlayPushQuad(Overlay, X, Y, W, H,
+                    Font->WhiteU, Font->WhiteV, Font->WhiteU, Font->WhiteV,
+                    Color);
 }
 
 /*
@@ -134,7 +154,7 @@ OverlayPushQuad(overlay *Overlay, real32 X, real32 Y, real32 W, real32 H,
 */
 internal real32
 OverlayPushText(overlay *Overlay, loaded_font *Font, real32 X, real32 Y,
-                const char *Text)
+                const char *Text, vec4 Color)
 {
     real32 PenX = X;
 
@@ -152,7 +172,7 @@ OverlayPushText(overlay *Overlay, loaded_font *Font, real32 X, real32 Y,
         OverlayPushQuad(Overlay,
                         PenX + Glyph->X0, Y + Glyph->Y0,
                         Glyph->X1 - Glyph->X0, Glyph->Y1 - Glyph->Y0,
-                        Glyph->U0, Glyph->V0, Glyph->U1, Glyph->V1);
+                        Glyph->U0, Glyph->V0, Glyph->U1, Glyph->V1, Color);
 
         // Advance even for a space, which has a zero-size quad but a real
         // width.  Pushing the empty quad costs six vertices and no pixels, so

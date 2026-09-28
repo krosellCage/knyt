@@ -1,7 +1,6 @@
 #if !defined(HANDMADE_CAMERA_H)
 /*
-  NOTE(yigit): The book's Camera class (ch. 10.8, camera.h) with the same data
-  and the same behaviour, but as a plain struct and free functions.  No
+  NOTE(yigit): The camera as a plain struct and free functions.  No
   methods, no constructor, no private section - the camera is data the caller
   owns, and every function takes a pointer to it.
 
@@ -22,8 +21,8 @@ enum camera_movement
     CameraMovement_Right,
 };
 
-// NOTE(yigit): Angles are RADIANS throughout, not the degrees the book stores,
-// because Sin and Cos take radians.  Conversions happen once, here.
+// NOTE(yigit): Angles are RADIANS throughout, not degrees, because Sin and
+// Cos take radians.  Conversions happen once, here.
 #define CAMERA_DEFAULT_YAW         (-0.5f*Pi32)             // -90 deg, looks down -Z
 #define CAMERA_DEFAULT_PITCH       0.0f
 #define CAMERA_DEFAULT_SPEED       2.5f                     // units per second
@@ -57,7 +56,7 @@ struct camera
 internal void
 CameraUpdateVectors(camera *Camera)
 {
-    // Euler angles to a direction vector (book p. 101).  Cos(Pitch) scales the
+    // Euler angles to a direction vector.  Cos(Pitch) scales the
     // horizontal part: looking straight up leaves nothing pointing sideways.
     Camera->Front = Normalize(Vec3(Cos(Camera->Yaw) * Cos(Camera->Pitch),
                                    Sin(Camera->Pitch),
@@ -124,7 +123,7 @@ CameraProcessMouseLook(camera *Camera, real32 DeltaX, real32 DeltaY)
 
     // NOTE(yigit): Stop just short of straight up or down.  At exactly 90
     // degrees Front lines up with WorldUp, Cross returns zero, and the whole
-    // basis collapses - the LookAt flip the book warns about on p. 103.
+    // basis collapses and the view flips over.
     if(Camera->Pitch > CAMERA_PITCH_LIMIT)
     {
         Camera->Pitch = CAMERA_PITCH_LIMIT;
@@ -137,7 +136,7 @@ CameraProcessMouseLook(camera *Camera, real32 DeltaX, real32 DeltaY)
     CameraUpdateVectors(Camera);
 }
 
-// NOTE(yigit): Book ch. 10.9.  Nothing calls this yet - the platform layer
+// NOTE(yigit): Nothing calls this yet - the platform layer
 // sets Input->MouseZ to 0 and has a TODO about mousewheel support, so there is
 // no scroll delta to feed it.
 internal void

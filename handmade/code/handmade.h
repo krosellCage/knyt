@@ -65,19 +65,6 @@ inline game_controller_input *GetController(game_input *Input, int unsigned Cont
     return(Result);
 }
 
-struct tile_map
-{
-    int32 CountX;
-    int32 CountY;
-
-    real32 UpperLeftX;
-    real32 UpperLeftY;
-    real32 TileWidth;
-    real32 TileHeight;
-
-    uint32 *Tiles;
-};
-
 // NOTE(yigit): Last-seen write times for one program's source files, so we can
 // notice an edit on disk.  Only timestamps live here - never the file names.
 // String literals are part of the DLL image and move every time it reloads, so
@@ -216,6 +203,31 @@ struct render_model
 // NOTE(yigit): Declared, never defined here.  See the Renderer member below.
 struct renderer;
 
+/*
+  The debug sliders' state.  Immediate-mode: there are no slider objects, and
+  a slider exists only for the length of the DebugSlider call that draws it.
+  Only what has to outlive a frame is kept here.
+
+  NOTE(yigit): A slider is NAMED by the address of the value it changes.  Two
+  sliders never change the same value, so the names cannot clash, and the
+  values live in game_state - platform memory that does not move when the DLL
+  reloads - so the name stays valid across a reload.  A label string would
+  not: literals live in the DLL image, which moves on every reload (see
+  shader_watch).
+*/
+struct debug_ui
+{
+    // Kept between frames.
+    real32 *ActiveValue;        // the value whose slider is being dragged, or 0
+    bool32 MouseWasDown;        // the left button, last frame
+
+    // Worked out fresh at the top of every frame, by DebugUIBegin.
+    bool32 MouseDown;           // held right now
+    bool32 MousePressed;        // went down THIS frame
+    real32 MouseX;
+    real32 MouseY;
+};
+
 struct game_state
 {
     real32 PlayerX;
@@ -245,6 +257,7 @@ struct game_state
     // fixed list of anything.
     render_model Model;         // the subject of the scene
     render_model MarkerModel;   // a small cube drawn at each point light
+    texture_handle Skybox;      // a cube map, drawn behind everything
 
     // 2D screen-space pass - debug text and anything else that sits on top of
     // the scene.  Refilled from empty every frame.
@@ -279,6 +292,9 @@ struct game_state
     loaded_sound Music;
     uint32 MusicPlayCursor;
 
+    real32 Exposure;
+
+    debug_ui UI;
 };
 
 #define HANDMADE_H

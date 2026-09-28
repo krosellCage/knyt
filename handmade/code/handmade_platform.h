@@ -164,6 +164,8 @@ typedef struct game_input
     int32 WindowHeight;
 
     game_controller_input Controllers[5];
+
+    bool32 CursorFree;
 } game_input;
 
 struct memory_arena

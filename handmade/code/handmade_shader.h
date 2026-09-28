@@ -131,7 +131,20 @@ global_variable const shader_source_files GlobalShaderFiles[] =
 {
     {"data\\vertexShader.vert", "data\\fragmentShader.frag"},
     {"data\\vertexShader.vert", "data\\lightCube.frag"},
+
+    // NOTE(yigit): Same vertex shader as the lamp - it is the same geometry,
+    // and only the colour differs.  This row's POSITION is what matters: the
+    // table and render_program are indexed together, so a row in the wrong
+    // place silently hands every draw the wrong program.  The Assert in
+    // RendererUpdateShaders catches a missing row, not a misplaced one.
+    {"data\\vertexShader.vert", "data\\outline.frag"},
+
     {"data\\overlay.vert",      "data\\overlay.frag"},
+    {"data\\skybox.vert",       "data\\skybox.frag"},
+    {"data\\fullscreen.vert",   "data\\tonemap.frag"},
+    {"data\\fullscreen.vert",   "data\\bloom_down.frag"},
+    {"data\\fullscreen.vert",   "data\\bloom_up.frag"},
+    {"data\\shadow.vert",       "data\\shadow.frag"},
 };
 
 // Builds a complete program, or returns 0 if any stage failed.  Nothing the
@@ -188,8 +201,7 @@ GameBuildShaderProgram(thread_context *Thread, game_memory *Memory, game_opengl_
   3. If a uniform is declared in GLSL but never actually read, the compiler
      strips it and glGetUniformLocation returns -1.  OpenGL then silently
      ignores the write (this is specified behaviour, not an error).  That is
-     why a uniform can appear to do nothing with no complaint from anywhere -
-     see the book's warning on p. 45.
+     why a uniform can appear to do nothing with no complaint from anywhere.
 */
 
 /*
@@ -245,7 +257,7 @@ internal void
 SetUniformBool(game_opengl_api *GL, uint32 Program, const char *Name, bool32 Value)
 {
     // NOTE(yigit): There is no bool upload in OpenGL - GLSL bools are set as
-    // ints.  This is what the book's setBool does behind the cast.
+    // ints.
     GL->glUseProgram(Program);
     GL->glUniform1i(GL->glGetUniformLocation(Program, Name), Value ? 1 : 0);
 }
@@ -311,7 +323,7 @@ SetUniformVec4(game_opengl_api *GL, uint32 Program, const char *Name, vec3 XYZ, 
     SetUniformVec4(GL, Program, Name, XYZ.X, XYZ.Y, XYZ.Z, W);
 }
 
-// NOTE(yigit): For chapter 8 onwards.  Transpose is GL_FALSE because mat4.E is
+// NOTE(yigit): Transpose is GL_FALSE because mat4.E is
 // already stored column-major (see handmade_math.h), which is the layout
 // OpenGL expects - so the data goes across untouched.
 internal void
