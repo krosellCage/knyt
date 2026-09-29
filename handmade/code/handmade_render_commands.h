@@ -57,6 +57,11 @@ enum render_program
     // Depth only, from the sun.  Fills the shadow map.
     RenderProgram_Shadow,
 
+    // Image-based lighting: bake the sky into lookup textures, once.
+    RenderProgram_IBLIrradiance,    // the sky blurred for diffuse light
+    RenderProgram_IBLPrefilter,     // the sky blurred by roughness, for reflections
+    RenderProgram_IBLBrdf,          // the Fresnel/geometry table
+
     RenderProgram_Count,
 };
 

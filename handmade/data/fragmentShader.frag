@@ -10,6 +10,16 @@ in vec3 WorldNormal;
 // looks in, how far away the first thing it hits is.
 uniform sampler2D shadowMap;
 
+// The sky's light, baked at startup (RendererBuildIBL) - see AmbientIBL.
+uniform samplerCube irradianceMap;  // light arriving at a surface facing each way
+uniform samplerCube prefilterMap;   // the sky blurred by roughness, one per mip
+uniform sampler2D brdfLUT;          // how much of a reflection survives
+
+// The camera, the same uniform the vertex shader reads.  Lighting here is in
+// VIEW space, but the baked sky is stored by WORLD direction, so looking it up
+// means turning directions back the other way first.
+uniform mat4 view;
+
 #define NR_POINT_LIGHTS 4
 
 struct Material {
@@ -150,6 +160,9 @@ float CalcShadow(vec3 normal, vec3 lightDir)
   Ambient light from a sky above and a ground below, blended by which way
   the surface faces.  Stands in for all the light that has bounced around
   the scene - a flat grey from everywhere was what made shadows look dead.
+
+  NOTE(yigit): No longer called - AmbientIBL reads the real sky instead.
+  Kept so the two can be compared by swapping one line in CalcDirLight.
 */
 vec3 HemisphereAmbient()
 {
@@ -374,6 +387,74 @@ vec3 MaterialAlbedo()
     return material.diffuseColor * texture(material.diffuse, TexCoords).rgb;
 }
 
+// ---------------------------------------------------------------------------
+// Image-based lighting: the sky as a light source, from every direction.
+// ---------------------------------------------------------------------------
+
+/*
+  How bright the sky counts as, relative to the texture.
+
+  NOTE(yigit): Not physical.  The sky texture is an ordinary picture, 0..1,
+  and knows nothing about how bright a real sky is next to the sun.  Worse,
+  Sponza is mostly INDOORS - arcades and a roofless atrium - and nothing here
+  knows which surfaces can actually see the sky, so all of them are lit by
+  all of it.  Turned down to keep the arcades from glowing; SSAO is what
+  would fix that properly.
+*/
+const float SkyIntensity = 0.35;
+
+// The last mip of the prefiltered sky: roughness 1.  Must match
+// IBL_PREFILTER_LEVELS - 1 in handmade_render_opengl.h.
+const float PrefilterMaxLod = 4.0;
+
+// Fresnel for light from the whole sky rather than one direction.  A rough
+// surface's facets face every which way, so it never quite reaches a full
+// mirror at grazing angles - the rougher, the lower the ceiling.
+vec3 FresnelSchlickRoughness(float CosTheta, vec3 F0, float Roughness)
+{
+    return F0 + (max(vec3(1.0 - Roughness), F0) - F0) *
+                pow(clamp(1.0 - CosTheta, 0.0, 1.0), 5.0);
+}
+
+/*
+  The sky's light on this pixel: the diffuse part from the irradiance map,
+  the reflection from the prefiltered sky and the BRDF table.  Replaces the
+  old two-colour hemisphere ambient with the actual sky.
+
+  N and V arrive in view space, like everything else in this shader.
+*/
+vec3 AmbientIBL(vec3 N, vec3 V, vec3 Albedo, float Roughness)
+{
+    // View space back to world space.  The camera only turns and moves, so
+    // undoing its turn is just the transpose of its rotation - and moving
+    // does not matter to a direction.
+    mat3 ViewToWorld = transpose(mat3(view));
+    vec3 WorldN = ViewToWorld * N;
+    vec3 WorldV = ViewToWorld * V;
+
+    // The direction a mirror here would show: the eye's ray, bounced.
+    vec3 R = reflect(-WorldV, WorldN);
+
+    float NdotV = max(dot(WorldN, WorldV), 0.0);
+
+    vec3 F0 = mix(DielectricF0, Albedo, Metallic);
+    vec3 F  = FresnelSchlickRoughness(NdotV, F0, Roughness);
+
+    // Diffuse: everything the surface faces, already gathered, in one read.
+    // Again only the share the reflection did not take, and none on a metal.
+    vec3 KD = (vec3(1.0) - F)*(1.0 - Metallic);
+    vec3 Diffuse = texture(irradianceMap, WorldN).rgb * Albedo;
+
+    // Reflection: the sky along R, read at the blur level for this
+    // roughness, then scaled by the table's share for this angle and
+    // roughness.
+    vec3 Prefiltered = textureLod(prefilterMap, R, Roughness*PrefilterMaxLod).rgb;
+    vec2 Brdf = texture(brdfLUT, vec2(NdotV, Roughness)).rg;
+    vec3 Specular = Prefiltered*(F*Brdf.x + Brdf.y);
+
+    return (KD*Diffuse + Specular)*SkyIntensity;
+}
+
 // normal lights the pixel; geoNormal - the flat, un-bumped one - only sets
 // the shadow bias, which is about the real triangle and its tilt towards the
 // sun.  Bumped, it would shrink wherever a bump faces the sun and bring the
@@ -393,11 +474,10 @@ vec3 CalcDirLight(DirLight light, vec3 normal, vec3 geoNormal, vec3 viewDir)
     vec3 Direct = PBRDirect(normal, viewDir, lightDir, light.diffuse,
                             Albedo, Roughness);
 
-    // The sky-and-ground light, scattered by the surface's colour.  No PI
-    // here: HemisphereAmbient gives radiance from a whole hemisphere, and
-    // gathering a hemisphere of it multiplies by exactly the PI that the
-    // diffuse term divides by.
-    vec3 Ambient = HemisphereAmbient() * Albedo * (1.0 - Metallic);
+    // The sky's light, diffuse and reflected.  To compare with the old
+    // two-colour ambient, swap in:
+    //     vec3 Ambient = HemisphereAmbient() * Albedo * (1.0 - Metallic);
+    vec3 Ambient = AmbientIBL(normal, viewDir, Albedo, Roughness);
 
     // Only the DIRECT sunlight is blocked.  Ambient stands for light that
     // has bounced around the scene and arrives from everywhere, so an

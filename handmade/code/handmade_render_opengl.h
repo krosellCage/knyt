@@ -211,7 +211,28 @@ struct renderer
     // where each pixel lands in the shadow map.  Kept here, like CurrentView,
     // because the command that sets it and the one that uses it are different.
     mat4 LightSpace;
+
+    /*
+      Image-based lighting: the sky, baked into three lookup textures for the
+      lit shader.  Built from IBLSource - the sky the game last asked to draw
+      - and rebuilt whenever any shader relinks, so an edit to the baking
+      shaders shows up without a restart.
+    */
+    texture_handle IBLSource;
+    uint32 IBLGeneration;           // ShaderGeneration it was last built at
+    uint32 IBLFramebuffer;
+    uint32 IrradianceMap;           // cube: light arriving at a surface facing each way
+    uint32 PrefilterMap;            // cube, mipped: the sky blurred more at each level
+    uint32 BrdfLUT;                 // 2D: the Fresnel/geometry part of reflections
 };
+
+// Sizes of the baked lighting.  Irradiance changes slowly with direction, so
+// it is tiny.  The prefiltered sky's sharpest level is mirror reflections and
+// needs the detail; each further level is half the size and twice as blurred.
+#define IBL_IRRADIANCE_SIZE     32
+#define IBL_PREFILTER_SIZE      128
+#define IBL_PREFILTER_LEVELS    5       // roughness 0, 0.25, 0.5, 0.75, 1
+#define IBL_BRDF_SIZE           256
 
 /*
   Creates the HDR target at this size, or does nothing if it is already
@@ -1109,6 +1130,22 @@ SetLitUniforms(renderer *Renderer, render_command_lighting *Lighting)
 
     GL->glActiveTexture(GL_TEXTURE3);
     GL->glBindTexture(GL_TEXTURE_2D, Renderer->ShadowDepth);
+
+    // The baked sky lighting, on 5, 6 and 7 - past everything GameDrawModel
+    // rebinds per submesh (0, 1, 2, 4) and the shadow map (3).  Until the
+    // first bake these are 0, and read back black: one frame with no sky
+    // light, at startup.
+    SetUniformInt(GL, Lit, "irradianceMap", 5);
+    SetUniformInt(GL, Lit, "prefilterMap", 6);
+    SetUniformInt(GL, Lit, "brdfLUT", 7);
+
+    GL->glActiveTexture(GL_TEXTURE5);
+    GL->glBindTexture(GL_TEXTURE_CUBE_MAP, Renderer->IrradianceMap);
+    GL->glActiveTexture(GL_TEXTURE6);
+    GL->glBindTexture(GL_TEXTURE_CUBE_MAP, Renderer->PrefilterMap);
+    GL->glActiveTexture(GL_TEXTURE7);
+    GL->glBindTexture(GL_TEXTURE_2D, Renderer->BrdfLUT);
+
     GL->glActiveTexture(GL_TEXTURE0);
 }
 
@@ -1315,6 +1352,152 @@ RendererDrawSkybox(renderer *Renderer, texture_handle Cubemap)
     GL->glDepthFunc(GL_LESS);
 }
 
+// One cube map of empty float faces, Size x Size, filtered LINEAR.  The
+// caller asks for mipmaps separately, since only the prefiltered sky has them.
+internal uint32
+RendererCreateFloatCubemap(game_opengl_api *GL, int32 Size)
+{
+    uint32 Texture = 0;
+    GL->glGenTextures(1, &Texture);
+    GL->glBindTexture(GL_TEXTURE_CUBE_MAP, Texture);
+
+    for(uint32 Face = 0; Face < 6; ++Face)
+    {
+        GL->glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + Face, 0, (int32)GL_RGB16F,
+                         Size, Size, 0, GL_RGB, GL_FLOAT, 0);
+    }
+
+    GL->glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    GL->glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    GL->glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    GL->glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    GL->glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+
+    return(Texture);
+}
+
+// Runs Program once for every face of one mip level of Cube: attach the
+// face, draw the fullscreen triangle, and ibl_cube.vert works out which way
+// each pixel of that face looks.
+internal void
+RendererRenderCubeFaces(renderer *Renderer, uint32 Program, uint32 Cube,
+                        int32 Level, int32 Size)
+{
+    game_opengl_api *GL = Renderer->GL;
+
+    GL->glViewport(0, 0, Size, Size);
+
+    for(int32 Face = 0; Face < 6; ++Face)
+    {
+        GL->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                   GL_TEXTURE_CUBE_MAP_POSITIVE_X + Face, Cube, Level);
+        SetUniformInt(GL, Program, "face", Face);
+        GL->glDrawArrays(GL_TRIANGLES, 0, 3);
+    }
+}
+
+/*
+  Bakes the sky into the three textures image-based lighting reads.
+
+  Diffuse light at a surface is the sky's light gathered over the whole
+  half of the sky it faces; a reflection is the sky gathered over a cone
+  that widens with roughness.  Both are far too many samples to take per
+  pixel per frame, and neither changes unless the sky does - so they are
+  worked out here, once, for every possible direction, and stored in cube
+  maps the lit shader can read with one lookup.
+
+  NOTE(yigit): Needs the IBL programs, which RendererUpdateShaders only
+  builds on the first frame - after GameInitScene has already run.  That is
+  why this runs from BeginScene rather than from loading.
+*/
+internal void
+RendererBuildIBL(renderer *Renderer)
+{
+    game_opengl_api *GL = Renderer->GL;
+
+    uint32 Sky = RendererGetTexture(Renderer, Renderer->IBLSource);
+    if(!Sky)
+    {
+        return;
+    }
+
+    // Made the first time only.  A rebuild after a shader edit overwrites
+    // their contents and keeps the textures.
+    if(!Renderer->IBLFramebuffer)
+    {
+        GL->glGenFramebuffers(1, &Renderer->IBLFramebuffer);
+
+        Renderer->IrradianceMap = RendererCreateFloatCubemap(GL, IBL_IRRADIANCE_SIZE);
+
+        // Mipmapped: level N is the sky blurred for roughness N/4.
+        // glGenerateMipmap here only ALLOCATES the smaller levels - their
+        // contents are rendered below, and the ones past the last level
+        // rendered are never sampled.
+        Renderer->PrefilterMap = RendererCreateFloatCubemap(GL, IBL_PREFILTER_SIZE);
+        GL->glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        GL->glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+
+        GL->glGenTextures(1, &Renderer->BrdfLUT);
+        GL->glBindTexture(GL_TEXTURE_2D, Renderer->BrdfLUT);
+        GL->glTexImage2D(GL_TEXTURE_2D, 0, (int32)GL_RG16F, IBL_BRDF_SIZE, IBL_BRDF_SIZE, 0,
+                         GL_RG, GL_FLOAT, 0);
+        GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        GL->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    }
+
+    // The sky needs mipmaps of its own for the baking to read.  Gathering
+    // hundreds of samples from its full-size faces would find single bright
+    // texels - a cloud edge - and smear them into sparkles; reading a
+    // smaller, already-averaged level instead is smooth.
+    GL->glActiveTexture(GL_TEXTURE0);
+    GL->glBindTexture(GL_TEXTURE_CUBE_MAP, Sky);
+    GL->glTexParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    GL->glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+
+    GL->glBindFramebuffer(GL_FRAMEBUFFER, Renderer->IBLFramebuffer);
+    GL->glBindVertexArray(Renderer->FullscreenVAO);
+    GL->glDisable(GL_DEPTH_TEST);
+    GL->glDisable(GL_BLEND);
+    SetStencilMode(GL, StencilMode_Off);
+
+    // 1. Irradiance: for every direction a surface could face, the sky's
+    //    light gathered over the half of the sky it faces.
+    uint32 Irradiance = Renderer->Programs[RenderProgram_IBLIrradiance];
+    GL->glUseProgram(Irradiance);
+    SetUniformInt(GL, Irradiance, "sky", 0);
+    RendererRenderCubeFaces(Renderer, Irradiance, Renderer->IrradianceMap,
+                            0, IBL_IRRADIANCE_SIZE);
+
+    // 2. Prefiltered sky: one mip level per roughness, each blurred over the
+    //    cone of directions a surface that rough reflects.
+    uint32 Prefilter = Renderer->Programs[RenderProgram_IBLPrefilter];
+    GL->glUseProgram(Prefilter);
+    SetUniformInt(GL, Prefilter, "sky", 0);
+    for(int32 Level = 0; Level < IBL_PREFILTER_LEVELS; ++Level)
+    {
+        real32 Roughness = (real32)Level / (real32)(IBL_PREFILTER_LEVELS - 1);
+        SetUniformFloat(GL, Prefilter, "roughness", Roughness);
+
+        RendererRenderCubeFaces(Renderer, Prefilter, Renderer->PrefilterMap,
+                                Level, IBL_PREFILTER_SIZE >> Level);
+    }
+
+    // 3. The BRDF table: not about the sky at all, so a plain 2D pass.
+    //    For every viewing angle (x) and roughness (y), how much of the
+    //    reflection survives Fresnel and self-shadowing.
+    uint32 Brdf = Renderer->Programs[RenderProgram_IBLBrdf];
+    GL->glUseProgram(Brdf);
+    GL->glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, Renderer->BrdfLUT, 0);
+    GL->glViewport(0, 0, IBL_BRDF_SIZE, IBL_BRDF_SIZE);
+    GL->glDrawArrays(GL_TRIANGLES, 0, 3);
+
+    GL->glBindVertexArray(0);
+    GL->glEnable(GL_DEPTH_TEST);
+}
+
 /*
   Blurs the HDR image into BloomMips[0], for the tonemap pass to mix in.
 
@@ -1431,6 +1614,16 @@ RenderBufferExecute(renderer *Renderer, render_buffer *Buffer)
 
                     render_command_begin_scene *Command = (render_command_begin_scene *)Header;
 
+                    // Bake the sky's lighting if there is a sky and it has not
+                    // been baked since the last shader relink.  Here, before
+                    // the scene, so the lit pass never reads a stale bake.
+                    if(IsValidHandle(Renderer->IBLSource) &&
+                       (Renderer->IBLGeneration != Renderer->ShaderGeneration))
+                    {
+                        RendererBuildIBL(Renderer);
+                        Renderer->IBLGeneration = Renderer->ShaderGeneration;
+                    }
+
                     RendererResizeHDRTarget(Renderer, Command->Width, Command->Height);
 
                     // From here on, every draw lands in our texture, not the window.
@@ -1543,6 +1736,15 @@ RenderBufferExecute(renderer *Renderer, render_buffer *Buffer)
                 render_command_draw_skybox *Command = (render_command_draw_skybox *)Header;
 
                 RendererDrawSkybox(Renderer, Command->Cubemap);
+
+                // The sky being drawn is the one the scene should be lit by.
+                // A different sky - a new one, or the first - forces a bake
+                // at the next BeginScene; the same one costs nothing.
+                if(Renderer->IBLSource.Value != Command->Cubemap.Value)
+                {
+                    Renderer->IBLSource = Command->Cubemap;
+                    Renderer->IBLGeneration = 0;
+                }
             } break;
 
             case RenderCommand_ShadowPass:

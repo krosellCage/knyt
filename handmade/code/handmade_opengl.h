@@ -260,6 +260,11 @@ typedef unsigned int   GLbitfield;
 // A float format: 16 bits per channel, so values can go above 1.0.
 // This is what makes a texture "HDR".
 #define GL_RGBA16F                  0x881A
+
+// Float formats with fewer channels, for image-based lighting: the light
+// maps need no alpha, and the BRDF table holds just two numbers per texel.
+#define GL_RGB16F                   0x881B
+#define GL_RG16F                    0x822F
 #define GL_SRGB8                    0x8C41
 #define GL_SRGB8_ALPHA8             0x8C43
 // NOTE(yigit): Row alignment for pixel uploads.  The default is 4, which makes

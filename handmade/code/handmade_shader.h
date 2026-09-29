@@ -145,6 +145,9 @@ global_variable const shader_source_files GlobalShaderFiles[] =
     {"data\\fullscreen.vert",   "data\\bloom_down.frag"},
     {"data\\fullscreen.vert",   "data\\bloom_up.frag"},
     {"data\\shadow.vert",       "data\\shadow.frag"},
+    {"data\\ibl_cube.vert",     "data\\ibl_irradiance.frag"},
+    {"data\\ibl_cube.vert",     "data\\ibl_prefilter.frag"},
+    {"data\\fullscreen.vert",   "data\\ibl_brdf.frag"},
 };
 
 // Builds a complete program, or returns 0 if any stage failed.  Nothing the
