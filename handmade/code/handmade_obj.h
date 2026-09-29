@@ -634,6 +634,7 @@ struct obj_vertex
 //   Ks r g b        specular colour      - the colour of the highlight
 //   Ns n            specular exponent    - bigger is a tighter highlight
 //   map_Kd file     diffuse texture      - needs texture coordinates to matter
+//   map_Ks file     specular texture     - how shiny each spot is
 //
 // NOTE(yigit): Names here are COPIED, not pointed at.  A material has to
 // outlive the file it was read from, unlike obj_material_ref which dies with
@@ -650,6 +651,9 @@ struct obj_material
 
     char DiffuseMapName[OBJ_MAX_MAP_NAME];
     bool32 HasDiffuseMap;
+
+    char SpecularMapName[OBJ_MAX_MAP_NAME];
+    bool32 HasSpecularMap;
 
     // map_d, an opacity mask.  Sponza uses it for foliage and
     // chains: the geometry is a flat card and the mask is what cuts the leaf
@@ -828,6 +832,27 @@ ObjParseMaterialLibrary(char *Contents, uint32 ContentsSize,
                 ObjCopyToken(Material->DiffuseMapName, OBJ_MAX_MAP_NAME,
                              Name, (uint32)(C - Name));
                 Material->HasDiffuseMap = true;
+            }
+            else if(ObjLineStartsWith(At, "map_Ks"))
+            {
+                char *C = At + 6;
+                ObjSkipWhitespace(&C);
+
+                // Everything to the end of the line - a texture path may
+                // contain spaces, and trailing whitespace is trimmed after.
+                char *Name = C;
+                while(*C && !ObjIsEndOfLine(*C))
+                {
+                    ++C;
+                }
+                while((C > Name) && ObjIsWhitespace(C[-1]))
+                {
+                    --C;
+                }
+
+                ObjCopyToken(Material->SpecularMapName, OBJ_MAX_MAP_NAME,
+                             Name, (uint32)(C - Name));
+                Material->HasSpecularMap = true;
             }
         }
 

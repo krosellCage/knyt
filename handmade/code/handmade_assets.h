@@ -381,6 +381,13 @@ GameLoadMaterialTexture(thread_context *Thread, game_memory *Memory, renderer *R
         {
             return(Other->AlphaTexture);
         }
+
+        if((Encoding == TextureEncoding_Linear) &&
+           IsValidHandle(Other->SpecularTexture) &&
+           ObjNamesMatch2(Other->Material.SpecularMapName, MapName))
+        {
+            return(Other->SpecularTexture);
+        }
     }
 
     char TextureFileName[256];
@@ -479,6 +486,7 @@ GameLoadModel(thread_context *Thread, game_memory *Memory, renderer *Renderer,
         Submesh->IndexCount = Model.Submeshes[I].IndexCount;
         Submesh->Material = Materials[Model.Submeshes[I].MaterialIndex];
         Submesh->DiffuseTexture = {};
+        Submesh->SpecularTexture = {};
         Submesh->AlphaTexture = {};
 
         if(Submesh->Material.HasDiffuseMap)
@@ -488,6 +496,18 @@ GameLoadModel(thread_context *Thread, game_memory *Memory, renderer *Renderer,
                 GameLoadMaterialTexture(Thread, Memory, Renderer, FileName,
                                         Submesh->Material.DiffuseMapName,
                                         TextureEncoding_SRGB,
+                                        Result.Submeshes, Result.SubmeshCount - 1);
+        }
+
+        if(Submesh->Material.HasSpecularMap)
+        {
+            // How shiny each spot is - an amount, not a colour, so linear.
+            // Most of Sponza's are greyscale, and GL 3.3 has no one-channel
+            // sRGB format anyway.
+            Submesh->SpecularTexture =
+                GameLoadMaterialTexture(Thread, Memory, Renderer, FileName,
+                                        Submesh->Material.SpecularMapName,
+                                        TextureEncoding_Linear,
                                         Result.Submeshes, Result.SubmeshCount - 1);
         }
 

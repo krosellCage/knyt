@@ -5,7 +5,7 @@ in vec3 FragPos;
 in vec3 Normal;
 in vec2 TexCoords;
 in vec4 FragPosLightSpace;      // this point as the SUN sees it
-
+in vec3 WorldNormal;
 // The sun's view of the scene, depth only: for every direction the sun
 // looks in, how far away the first thing it hits is.
 uniform sampler2D shadowMap;
@@ -70,6 +70,21 @@ uniform PointLight pointLights[NR_POINT_LIGHTS];
 uniform int pointLightCount;
 
 /*
+  How shiny this spot is, from the specular map - the same amount for red,
+  green and blue.
+
+  NOTE(yigit): .r, spread to all three, not .rgb.  Most of Sponza's specular
+  maps are greyscale, which load as one-channel GL_RED textures, and those
+  read back as (value, 0, 0): with .rgb, every highlight would come out red.
+  The colour maps (floor_gloss.png is RGBA) are grey anyway, so their red
+  channel is as good a measure as any.
+*/
+vec3 SpecularMap(vec2 UV)
+{
+    return vec3(texture(material.specular, UV).r);
+}
+
+/*
   How much of the sun this point does NOT get: 0 = fully lit, 1 = fully in
   shadow, in between = the soft edge of a shadow.
 */
@@ -126,6 +141,23 @@ float CalcShadow(vec3 normal, vec3 lightDir)
     return Shadow / 9.0;
 }
 
+/*
+  Ambient light from a sky above and a ground below, blended by which way
+  the surface faces.  Stands in for all the light that has bounced around
+  the scene - a flat grey from everywhere was what made shadows look dead.
+*/
+vec3 HemisphereAmbient()
+{
+    const vec3 SkyColor    = vec3(0.10, 0.13, 0.20);   // bluish, from above
+    const vec3 GroundColor = vec3(0.08, 0.06, 0.04);   // warm, bounced off the stone below
+
+    // Y of the world normal: +1 facing straight up, 0 sideways, -1 straight down.
+    // Remapped to 0..1: 1 = all sky, 0.5 = half and half, 0 = all ground.
+    float Up = normalize(WorldNormal).y * 0.5 + 0.5;
+
+    return mix(GroundColor, SkyColor, Up);
+}
+
 vec3 CalcDirLight(DirLight light, vec3 normal, vec3 viewDir)
 {
     // Negated because light.direction points INTO the scene, and the dot
@@ -134,14 +166,14 @@ vec3 CalcDirLight(DirLight light, vec3 normal, vec3 viewDir)
 
     float diff = max(dot(normal, lightDir), 0.0);
 
-    vec3 reflectDir = reflect(-lightDir, normal);
-    float spec = pow(max(dot(viewDir, reflectDir), 0.0), material.shininess);
+    vec3 halfwayDir = normalize(lightDir + viewDir);
+    float spec = pow(max(dot(normal, halfwayDir), 0.0), material.shininess);
 
     vec3 DiffuseSample = material.diffuseColor * texture(material.diffuse, TexCoords).rgb;
 
-    vec3 ambient  = light.ambient  * DiffuseSample;
+    vec3 ambient  =  HemisphereAmbient() * DiffuseSample;
     vec3 diffuse  = light.diffuse  * diff * DiffuseSample;
-    vec3 specular = light.specular * spec * material.specularColor * texture(material.specular, TexCoords).rgb;
+    vec3 specular = light.specular * spec * material.specularColor * SpecularMap(TexCoords);
 
     // Only the DIRECT sunlight is blocked.  Ambient stands for light that
     // has bounced around the scene and arrives from everywhere, so an
@@ -172,7 +204,7 @@ vec3 CalcPointLight(PointLight light, vec3 normal, vec3 fragPos, vec3 viewDir)
 
     vec3 ambient  = light.ambient  * DiffuseSample;
     vec3 diffuse  = light.diffuse  * diff * DiffuseSample;
-    vec3 specular = light.specular * spec * material.specularColor * texture(material.specular, TexCoords).rgb;
+    vec3 specular = light.specular * spec * material.specularColor * SpecularMap(TexCoords);
 
     return (ambient + diffuse + specular) * attenuation;
 }

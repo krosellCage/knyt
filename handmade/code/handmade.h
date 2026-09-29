@@ -162,6 +162,7 @@ struct render_submesh
     // alone.  The same fallback covers the alpha mask, where white means fully
     // opaque.
     texture_handle DiffuseTexture;
+    texture_handle SpecularTexture;
     texture_handle AlphaTexture;
 };
 

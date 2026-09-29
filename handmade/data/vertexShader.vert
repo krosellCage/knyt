@@ -6,7 +6,7 @@ layout (location = 2) in vec2 aTexCoord;
 out vec3 FragPos;
 out vec3 Normal;
 out vec2 TexCoords;
-
+out vec3 WorldNormal; 
 // Where this point sits in the SUN'S view - the same maths shadow.vert does,
 // so it lands on exactly the shadow-map pixel this point was drawn into.
 //
@@ -24,7 +24,7 @@ void main()
     FragPos = vec3(view * model * vec4(aPos, 1.0));
 
     Normal = mat3(view * model) * aNormal;
-
+    WorldNormal = mat3(model) * aNormal;
     TexCoords = aTexCoord;
 
     FragPosLightSpace = lightSpace * model * vec4(aPos, 1.0);

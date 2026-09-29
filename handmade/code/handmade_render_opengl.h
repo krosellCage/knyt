@@ -878,13 +878,19 @@ GameDrawModel(renderer *Renderer, uint32 Program, render_model *Model,
         uint32 DiffuseTexture = RendererGetTexture(Renderer, Submesh->DiffuseTexture);
         if(!DiffuseTexture) { DiffuseTexture = WhiteTexture; }
 
+        // White again: the shader multiplies the map by Ks, so white leaves
+        // Ks exactly as the .mtl gave it - the same highlight as before
+        // specular maps existed.
+        uint32 SpecularTexture = RendererGetTexture(Renderer, Submesh->SpecularTexture);
+        if(!SpecularTexture) { SpecularTexture = WhiteTexture; }
+
         uint32 AlphaTexture = RendererGetTexture(Renderer, Submesh->AlphaTexture);
         if(!AlphaTexture) { AlphaTexture = WhiteTexture; }
 
         GL->glActiveTexture(GL_TEXTURE0);
         GL->glBindTexture(GL_TEXTURE_2D, DiffuseTexture);
         GL->glActiveTexture(GL_TEXTURE1);
-        GL->glBindTexture(GL_TEXTURE_2D, WhiteTexture);
+        GL->glBindTexture(GL_TEXTURE_2D, SpecularTexture);
         GL->glActiveTexture(GL_TEXTURE2);
         GL->glBindTexture(GL_TEXTURE_2D, AlphaTexture);
 
