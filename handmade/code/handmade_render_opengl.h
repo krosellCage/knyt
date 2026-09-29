@@ -78,6 +78,7 @@ struct lit_program_locations
     int32 MaterialDiffuse;
     int32 MaterialSpecular;
     int32 MaterialAlphaMask;
+    int32 MaterialBump;
 
     point_light_locations PointLights[4];
 };
@@ -887,12 +888,21 @@ GameDrawModel(renderer *Renderer, uint32 Program, render_model *Model,
         uint32 AlphaTexture = RendererGetTexture(Renderer, Submesh->AlphaTexture);
         if(!AlphaTexture) { AlphaTexture = WhiteTexture; }
 
+        // White is the same height everywhere - no change in height, so no
+        // tilt, and a surface without a bump map lights exactly as before.
+        uint32 BumpTexture = RendererGetTexture(Renderer, Submesh->BumpTexture);
+        if(!BumpTexture) { BumpTexture = WhiteTexture; }
+
+        // NOTE(yigit): Unit 4, not 3.  Unit 3 is the shadow map, bound once a
+        // frame in SetLitUniforms and relied on to still be there.
         GL->glActiveTexture(GL_TEXTURE0);
         GL->glBindTexture(GL_TEXTURE_2D, DiffuseTexture);
         GL->glActiveTexture(GL_TEXTURE1);
         GL->glBindTexture(GL_TEXTURE_2D, SpecularTexture);
         GL->glActiveTexture(GL_TEXTURE2);
         GL->glBindTexture(GL_TEXTURE_2D, AlphaTexture);
+        GL->glActiveTexture(GL_TEXTURE4);
+        GL->glBindTexture(GL_TEXTURE_2D, BumpTexture);
 
         // The last argument is a byte OFFSET into the bound element buffer,
         // not a pointer - a leftover from when this call could read indices
@@ -937,6 +947,7 @@ RefreshLitLocations(renderer *Renderer)
     L->MaterialDiffuse   = GetUniformLocation(GL, Program, "material.diffuse");
     L->MaterialSpecular  = GetUniformLocation(GL, Program, "material.specular");
     L->MaterialAlphaMask = GetUniformLocation(GL, Program, "material.alphaMask");
+    L->MaterialBump      = GetUniformLocation(GL, Program, "material.bump");
 
     // The array names, built once and then never again.  A local buffer is safe
     // because glGetUniformLocation copies the name it is handed.
@@ -1083,6 +1094,7 @@ SetLitUniforms(renderer *Renderer, render_command_lighting *Lighting)
     SetUniformIntAt(GL, L->MaterialDiffuse, 0);
     SetUniformIntAt(GL, L->MaterialSpecular, 1);
     SetUniformIntAt(GL, L->MaterialAlphaMask, 2);
+    SetUniformIntAt(GL, L->MaterialBump, 4);     // 3 is the shadow map
 
     // The shadow map, and the matrix that finds each pixel in it - the same
     // one the shadow pass drew with, kept from the ShadowPass command.

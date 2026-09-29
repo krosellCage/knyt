@@ -376,7 +376,11 @@ extern "C" GAME_UPDATE_AND_RENDER(GameUpdateAndRender)
     {
         Lighting->DirLightDirectionWorld = GlobalDirLightDirection;
         Lighting->DirAmbient  = Vec3(0.05f, 0.05f, 0.05f);
-        Lighting->DirDiffuse  = Vec3(1.0f, 0.55f, 0.2f);
+        // NOTE(yigit): Times PI since the switch to PBR.  Its diffuse term
+        // divides by PI - light scattered over a whole hemisphere of
+        // directions - so the same number would light the scene a third as
+        // brightly.  This keeps the old look; raise it for a harsher sun.
+        Lighting->DirDiffuse  = Vec3(1.0f, 0.55f, 0.2f) * Pi32;
         Lighting->DirSpecular = Vec3(0.50f, 0.50f, 0.50f);
 
         // The sun is the only light.  No point lights: PushLighting starts

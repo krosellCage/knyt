@@ -388,6 +388,13 @@ GameLoadMaterialTexture(thread_context *Thread, game_memory *Memory, renderer *R
         {
             return(Other->SpecularTexture);
         }
+
+        if((Encoding == TextureEncoding_Linear) &&
+           IsValidHandle(Other->BumpTexture) &&
+           ObjNamesMatch2(Other->Material.BumpMapName, MapName))
+        {
+            return(Other->BumpTexture);
+        }
     }
 
     char TextureFileName[256];
@@ -487,6 +494,7 @@ GameLoadModel(thread_context *Thread, game_memory *Memory, renderer *Renderer,
         Submesh->Material = Materials[Model.Submeshes[I].MaterialIndex];
         Submesh->DiffuseTexture = {};
         Submesh->SpecularTexture = {};
+        Submesh->BumpTexture = {};
         Submesh->AlphaTexture = {};
 
         if(Submesh->Material.HasDiffuseMap)
@@ -507,6 +515,18 @@ GameLoadModel(thread_context *Thread, game_memory *Memory, renderer *Renderer,
             Submesh->SpecularTexture =
                 GameLoadMaterialTexture(Thread, Memory, Renderer, FileName,
                                         Submesh->Material.SpecularMapName,
+                                        TextureEncoding_Linear,
+                                        Result.Submeshes, Result.SubmeshCount - 1);
+        }
+
+        if(Submesh->Material.HasBumpMap)
+        {
+            // Height is an amount too, and the shader measures how it CHANGES
+            // across the surface - a curve applied by sRGB decoding would bend
+            // every slope it computes.
+            Submesh->BumpTexture =
+                GameLoadMaterialTexture(Thread, Memory, Renderer, FileName,
+                                        Submesh->Material.BumpMapName,
                                         TextureEncoding_Linear,
                                         Result.Submeshes, Result.SubmeshCount - 1);
         }

@@ -163,6 +163,7 @@ struct render_submesh
     // opaque.
     texture_handle DiffuseTexture;
     texture_handle SpecularTexture;
+    texture_handle BumpTexture;
     texture_handle AlphaTexture;
 };
 
